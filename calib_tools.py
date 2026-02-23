@@ -241,13 +241,13 @@ class UniformAndBinaryCalib(pzp.Piece):
             df.to_csv(f"{save_name}.csv")
 
 
-def extract_one_cos2_period(grayscale, intensities):
+def extract_one_cos2_period(grayscale, intensities, ignore_from_beginning=1):
     x = grayscale
     y = intensities
     slopes = np.sign(np.diff(y, append=y[-1]))
     
     exclude_first = np.ones_like(y, dtype=bool)
-    exclude_first[0] = 0    
+    exclude_first[:ignore_from_beginning+1] = 0    
     intensity_diff = np.abs(y - y[0])
     same_slope = (slopes == slopes[0]) & exclude_first
     intensity_diff_masked = intensity_diff[same_slope]
@@ -257,10 +257,9 @@ def extract_one_cos2_period(grayscale, intensities):
     return x[0:end_idx], y[0:end_idx]
     
 
-def map_grayscale_to_phase(grayscales, intensities, ignored_samples=1):
+def map_grayscale_to_phase(grayscales, intensities, ignored_samples=1, ignored_from_beginning=1):
     # Preprocess input to extract one period and shift so that index 0 is maximum
-    x, y = extract_one_cos2_period(grayscales, intensities)
-    
+    x, y = extract_one_cos2_period(grayscales, intensities, ignored_from_beginning)
     slopes = np.sign(np.diff(y, append=y[-1]+ (y[-1]-y[-2])))
     cos = np.sqrt(y) * slopes * -1
     raw_phase = 2*np.acos(cos)
@@ -333,7 +332,8 @@ class PhaseCorrector(pat.PatternGenerator):
     """
     PARAM_MIN_WL = "Min. wavelength"
     PARAM_MAX_WL = "Max. wavelength"
-    PARAM_IGNORE = "Ignored samples"
+    PARAM_IGNORE = "Ignored samples around min."
+    PARAM_IGNORE_B = "Ignored samples at beginning"
     PARAM_CORRECTION = "Correction data"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_GRAYSCALES = "Grayscales"
@@ -343,6 +343,7 @@ class PhaseCorrector(pat.PatternGenerator):
         pzp.param.spinbox(self, self.PARAM_MIN_WL, 1050, 1, 9999999)(None)
         pzp.param.spinbox(self, self.PARAM_MAX_WL, 1400, 1, 9999999)(None)
         pzp.param.spinbox(self, self.PARAM_IGNORE, 1, 0, 9999)(None)
+        pzp.param.spinbox(self, self.PARAM_IGNORE_B, 1, 0, 9999)(None)
         pzp.param.checkbox(self, self.PARAM_INVERT_CORRECTION_ORDER, False)(None)
         # Column by column (per wavelength) correction data. Each index correcspond to a (2,N) shape matrix that contains calibration curve.
         pzp.param.array(self, self.PARAM_CORRECTION, False)(None) 
@@ -380,11 +381,14 @@ class PhaseCorrector(pat.PatternGenerator):
     def generate_pattern(self, slm_dim):
         pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.T * 2*np.pi / 1024
         ignore = self[self.PARAM_IGNORE].value
+        ignore_b = self[self.PARAM_IGNORE_B].value
+        inverted = self[self.PARAM_INVERT_CORRECTION_ORDER].value
         correction_data = self[self.PARAM_CORRECTION].value
         grayscales = self[self.PARAM_GRAYSCALES].value
         corrected_grayscales = []
         for row in range(pattern.shape[0]):  # I realized later that wavelengths are spread along axis 1 and not 0
-            grayscale, phase = map_grayscale_to_phase(grayscales, correction_data[row,:], ignore)
+            inverted_row = correction_data.shape[0] - row - 1
+            grayscale, phase = map_grayscale_to_phase(grayscales, correction_data[row if not inverted else inverted_row,:], ignore, ignore_b)
             f = build_phase_to_grayscale_interpolator(phase, grayscale)
 
             # corrected_grayscale = linear_interpolation(pattern[row, :], phase, grayscale)
