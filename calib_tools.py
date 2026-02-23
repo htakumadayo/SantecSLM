@@ -234,62 +234,38 @@ class UniformAndBinaryCalib(pzp.Piece):
             df = pd.DataFrame(spectrums, index=contrasts, columns=effective_wls)
             df.to_csv(f"{save_name}.csv")
 
-# receives row by row calibration data
-# linear interpolation 
-# 1. find the usable part of the curve (Pick next point at the same height and same slope)
-# The samples between the beginning and that point is one period of cos^2. 
-# If no such point is found, then take all
-# 
-# 2. Apply inverse cos^2. Let the obtained value φ'.
-# 3. If the slope at a given point is positive, then transform φ'-> pi-φ'
-# 4. Subtract pi from everything before 0, so that we get a continuous map
-# 5. Then subtract from all the absolute value of first value
-# 6. Multiply everything by 2
-def map_grayscale_to_phase(grayscales, intensities, ignored_samples=1):
-    """
-    Computes the map between grayscales and phases using results from the 45deg polarizer experiment.
-    2 Assumptions:
-    - Intensity is monotonically increasing until it reaches maximum. In other words, maximum comes before minimum.
-    - No irregular points, i.e. fluctuations that make the slope non "Continuous". i.e. if the curve is globally 
-        increasing, there shouldn't be points that make the curve locally decreasing.
 
-    Return a tuple of two arrays: (grayscales, phases)
-
-    :param grayscales: Grayscale values of the samples
-    :param intensities:  Measured intensities corresponding to the grayscales
-    :param ignored_samples: Ignored sample number to the right and the left of global minimum to avoid experimental imperfections. Mainly due to residual intensities.
-    """
-    x, y = grayscales, intensities
-    if np.max(y) > 1:
-        y /= np.max(y)
-
+def extract_one_cos2_period(grayscale, intensities):
+    x = grayscale
+    y = intensities
     slopes = np.sign(np.diff(y, append=y[-1]))
-    dist_from_1st = np.sign(y - y[0])
-    period_delim = np.sign(np.diff(dist_from_1st, append=dist_from_1st[-1])) == slopes[0]
+    
+    exclude_first = np.ones_like(y, dtype=bool)
+    exclude_first[0] = 0    
+    intensity_diff = np.abs(y - y[0])
+    same_slope = (slopes == slopes[0]) & exclude_first
+    intensity_diff_masked = intensity_diff[same_slope]
+    idx_masked = np.arange(y.size)[same_slope]
 
-    if period_delim.size > 1:
-        period_end_idx = np.argmax(period_delim[1:])+1
-        x = x[0:period_end_idx]
-        y = y[0:period_end_idx]
-        slopes = slopes[0:period_end_idx]
+    end_idx = idx_masked[np.argmin(intensity_diff_masked)]
+    return x[0:end_idx], y[0:end_idx]
+    
 
-    ignore_mask = np.ones_like(x, dtype=bool)
-    ignore_mask[np.argmin(y)-ignored_samples : np.argmin(y)+ignored_samples+1] = 0
-    x,y,slopes = x[ignore_mask], y[ignore_mask], slopes[ignore_mask]
+def map_grayscale_to_phase(grayscales, intensities, ignored_samples=1):
+    # Preprocess input to extract one period and shift so that index 0 is maximum
+    x, y = extract_one_cos2_period(grayscales, intensities)
+    
+    slopes = np.sign(np.diff(y, append=y[-1]+ (y[-1]-y[-2])))
+    cos = np.sqrt(y) * slopes * -1
+    raw_phase = 2*np.acos(cos)
 
-    phases = np.acos(np.sqrt(y))
-    phases[slopes > 0] = np.pi - phases[slopes > 0]
-    zero_idx = np.argmin(np.abs(phases - 0))
-    phases[0:zero_idx] -= np.pi
-    phases -= phases[0]
-    phases *= 2
-    if x[-1] != 1023:
-        phases = np.append(phases, 2*np.pi)
-        x = np.append(x, 1023)
-    return x, phases
+    min_idx = np.argmin(y)
+    ignore_mask = np.ones_like(raw_phase, dtype=bool)
+    ignore_mask[min_idx-ignored_samples : min_idx+ignored_samples+1] = False
 
+    return x[ignore_mask], raw_phase[ignore_mask]
 
-def linear_interpolation(target, x, y):
+def linear_interpolation(target, x, y, maximum=1023):
     """
     Given two arrays that (discretely) represent some function, apply that function to a given array 
     using linear interpolation.
@@ -298,12 +274,14 @@ def linear_interpolation(target, x, y):
     :param x: Arguments
     :param y: Images correspondting to the arguments
     """
-    if np.min(target) < np.min(x) or np.max(target) > np.max(x):
+    if np.min(target) < np.min(x):
         raise ValueError("Linear interpolation failed: Some target values not in range of x")
 
     # Find what coefficients to use
     diff = np.tile(x, (target.size, 1)).T - target
+    # interp_coef_idx = np.argmax(diff > 0, axis=0) - 1
     interp_coef_idx = x.size - np.argmax(diff[::-1, :] <= 0, axis=0) - 1
+    interp_coef_idx[target > np.max(x)] -= 1  # target x bigger than np.max(s) use last interpolation slope
     # Repeat last value to avoid indexing issues
     x = np.append(x, x[-1] + 1)  # Avoid divison by zero
     y = np.append(y, y[-1])
@@ -311,7 +289,36 @@ def linear_interpolation(target, x, y):
     # Interpolation formula
     slope = (y[interp_coef_idx + 1] - y[interp_coef_idx]) / (x[interp_coef_idx + 1] - x[interp_coef_idx])
     result = y[interp_coef_idx] + (target - x[interp_coef_idx])*slope
+    result[result > maximum] = maximum  # Clamp
     return result
+
+def build_phase_to_grayscale_interpolator(phases, grayscales, period=2*np.pi):
+    """
+    Build a phase->grayscale linear interpolator that handles 2π wrapping.
+
+    Parameters
+    ----------
+    phases : array_like
+        Measured phases in radians (wrapped to [0, 2π) or close).
+    grayscales : array_like
+        Corresponding grayscale values (same length).
+    period : float
+        Phase period (default 2π).
+
+    Returns
+    -------
+    f : callable
+        f(phi) returns interpolated grayscale for phase(s) phi (radians).
+    """
+    
+    # First remove the 2pi wrap
+    phases = (phases - phases[0]) % period + phases[0]
+
+    def f(phi):
+        phi[phi < phases[0]] += period
+        return linear_interpolation(phi, phases, grayscales)
+    return f
+
 
 
 class PhaseCorrector(pat.PatternGenerator):
@@ -370,7 +377,10 @@ class PhaseCorrector(pat.PatternGenerator):
         corrected_grayscales = []
         for row in range(pattern.shape[0]):  # I realized later that wavelengths are spread along axis 1 and not 0
             grayscale, phase = map_grayscale_to_phase(grayscales, correction_data[row,:], ignore)
-            corrected_grayscale = linear_interpolation(pattern[row, :], phase, grayscale)
+            f = build_phase_to_grayscale_interpolator(phase, grayscale)
+
+            # corrected_grayscale = linear_interpolation(pattern[row, :], phase, grayscale)
+            corrected_grayscale = f(pattern[row, :])
             corrected_grayscales.append(corrected_grayscale)
         corrected_pattern = np.stack(corrected_grayscales, dtype=int).T  # So fix it here
         return corrected_pattern
