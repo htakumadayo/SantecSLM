@@ -144,10 +144,12 @@ class UniformAndBinaryCalib(pzp.Piece):
     PARAM_FILENAME = "Save file name"
     PARAM_CALIB_DATA = "Calibration data"
     PARAM_CALIB_WL = "Calibration wl"
+    PARAM_USE_CORRECTOR = "Apply phase correction"
 
     PARAM_SPEC_NAME = "Spectrometer piece name"
     PARAM_UNIFORM_NAME = "Uniform pattern piece name"
     PARAM_BINARY_NAME = "Binary grating pattern piece name"
+    PARAM_CORRECTOR_NAME = "Pattern corrector piece name"
 
     MODE_EFF = "BinaryEfficiency"
     MODE_GRAY = "GrayscaleCalibration"
@@ -162,9 +164,10 @@ class UniformAndBinaryCalib(pzp.Piece):
         pzp.param.dropdown(self, self.PARAM_MODE, self.MODE_EFF)([self.MODE_EFF, self.MODE_GRAY])
         pzp.param.spinbox(self, self.PARAM_SAMPLE_NB, 30, 1, 9999)(None)
         pzp.param.spinbox(self, self.PARAM_CAPT_INTERVAL, 50.0, 0.05, 9999, v_step=5.0)(None)
-        pzp.param.spinbox(self, self.PARAM_MAX_WL, 1550, 1, 99999)(None)
         pzp.param.spinbox(self, self.PARAM_MIN_WL, 1050, 1, 99999)(None)
+        pzp.param.spinbox(self, self.PARAM_MAX_WL, 1550, 1, 99999)(None)
         pzp.param.dropdown(self, self.PARAM_NORMALIZE, self.NORM_NONE)([self.NORM_NONE, self.NORM_ALL, self.NORM_PER_WL])
+        pzp.param.checkbox(self, self.PARAM_USE_CORRECTOR, False)(None)
         pzp.param.text(self, self.PARAM_FILENAME, f"calib{self.MODE_EFF}.csv")(None)
         pzp.param.array(self, self.PARAM_CALIB_DATA, False)(None)
         pzp.param.array(self, self.PARAM_CALIB_WL, False)(None)
@@ -172,6 +175,7 @@ class UniformAndBinaryCalib(pzp.Piece):
         pzp.param.text(self, self.PARAM_SPEC_NAME, OceanSpectrometer.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_UNIFORM_NAME, pat.UniformPattern.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_BINARY_NAME, pat.BinaryGratingPattern.__name__, visible=False)(None)
+        pzp.param.text(self, self.PARAM_CORRECTOR_NAME, PhaseCorrector.__name__, visible=False)(None)
         pzp.action.settings(self)
 
     def define_actions(self):
@@ -195,7 +199,7 @@ class UniformAndBinaryCalib(pzp.Piece):
             if mode == self.MODE_EFF:
                 grating[pat.BinaryGratingPattern.PARAM_DUTY_CYCLE].set_value(0.5)
 
-            target_piece = grating if self.MODE_EFF else uniform
+            target_piece = grating if self.MODE_EFF == mode else uniform
             target_piece[target_piece.PARAM_PHASE].set_value(0)
             target_piece.actions[target_piece.ACTION_SEND]()
             time.sleep(1)
@@ -204,6 +208,8 @@ class UniformAndBinaryCalib(pzp.Piece):
             for i, contrast in enumerate(contrasts):
                 target_piece[target_piece.PARAM_PHASE].set_value(contrast)
                 target_piece.actions[target_piece.ACTION_SEND]()
+                if self[self.PARAM_USE_CORRECTOR].value:
+                    self.puzzle[self[self.PARAM_CORRECTOR_NAME].value].actions[pat.PatternGenerator.ACTION_SEND]()
                 time.sleep(wait_time)
                 self.puzzle.process_events()
                 spectrums[i] = spec["values"].value[spec_mask]
@@ -331,11 +337,13 @@ class PhaseCorrector(pat.PatternGenerator):
     PARAM_CORRECTION = "Correction data"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_GRAYSCALES = "Grayscales"
+    PARAM_INVERT_CORRECTION_ORDER = "Invert correction order"
 
     def define_params(self):
         pzp.param.spinbox(self, self.PARAM_MIN_WL, 1050, 1, 9999999)(None)
         pzp.param.spinbox(self, self.PARAM_MAX_WL, 1400, 1, 9999999)(None)
         pzp.param.spinbox(self, self.PARAM_IGNORE, 1, 0, 9999)(None)
+        pzp.param.checkbox(self, self.PARAM_INVERT_CORRECTION_ORDER, False)(None)
         # Column by column (per wavelength) correction data. Each index correcspond to a (2,N) shape matrix that contains calibration curve.
         pzp.param.array(self, self.PARAM_CORRECTION, False)(None) 
         pzp.param.array(self, self.PARAM_GRAYSCALES, False)(None)
@@ -357,20 +365,20 @@ class PhaseCorrector(pat.PatternGenerator):
             wls = df.columns.to_numpy(dtype=float)
 
             self[self.PARAM_GRAYSCALES].set_value(contrasts_loaded)
-
+            print(wls.shape, data.shape)
             colbycol_calib = []
             col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
             max_wl, min_wl = self[self.PARAM_MAX_WL].value, self[self.PARAM_MIN_WL].value
             for col in range(col_nb):   # Are wavelengths scattered linearly?? -> Assume yes
                 assumed_wl = min_wl + col*(max_wl - min_wl)/col_nb
                 calib_idx = np.argmin(np.abs(wls - assumed_wl))
-                calib = data[calib_idx, :]
+                calib = data[:, calib_idx]
                 colbycol_calib.append(calib)
             self[self.PARAM_CORRECTION].set_value(np.stack(colbycol_calib))
         super().define_actions()
 
     def generate_pattern(self, slm_dim):
-        pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.T * 2*np.pi
+        pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.T * 2*np.pi / 1024
         ignore = self[self.PARAM_IGNORE].value
         correction_data = self[self.PARAM_CORRECTION].value
         grayscales = self[self.PARAM_GRAYSCALES].value
@@ -382,7 +390,7 @@ class PhaseCorrector(pat.PatternGenerator):
             # corrected_grayscale = linear_interpolation(pattern[row, :], phase, grayscale)
             corrected_grayscale = f(pattern[row, :])
             corrected_grayscales.append(corrected_grayscale)
-        corrected_pattern = np.stack(corrected_grayscales, dtype=int).T  # So fix it here
+        corrected_pattern = np.stack(corrected_grayscales).T.astype(int)  # So fix it here
         return corrected_pattern
     
 
@@ -394,22 +402,21 @@ class Polarizer45degHelper(pzp.Piece):
 
     PARAM_UNIFORM = "Uniform pattern piece name"
     PARAM_INTERVAL = "Sampling interval (ms)"
-
+    PARAM_SPEC_NAME = "Spectrometer piece name"
+    PARAM_FOCUS_WL = "Focused wavelength"
 
     def define_params(self):
         pzp.param.spinbox(self, self.PARAM_INTERVAL, 50, 1, 5000, v_step=50)(None)
-        pzp.param.text(self, self.PARAM_UNIFORM, pat.UniformPattern.__name__)(None)
-        self.fetcher = util.CameraImageFetcher(self.puzzle)
+        pzp.param.spinbox(self, self.PARAM_FOCUS_WL, 1275, 1, 99999)(None)
+        pzp.param.text(self, self.PARAM_UNIFORM, pat.UniformPattern.__name__, visible=False)(None)
+        pzp.param.text(self, self.PARAM_SPEC_NAME, OceanSpectrometer.__name__, visible=False)(None)
 
     def define_actions(self):
-        @pzp.action.define(self, "Set background image")
-        def set_background():
-            self.fetcher.set_backbround()
-
         @pzp.action.define(self, "Find max and min locations")
         def find_max_min():
             sample_nb = 40
             self.uniform_generator = self.puzzle[self[self.PARAM_UNIFORM].value]
+            self.spectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
             phases = np.linspace(0, 1023, sample_nb, dtype=int)
             intensities = np.zeros_like(phases)
 
@@ -465,5 +472,9 @@ class Polarizer45degHelper(pzp.Piece):
         self.uniform_generator[pat.UniformPattern.PARAM_PHASE].set_value(phase)
         self.uniform_generator.actions[pat.PatternGenerator.ACTION_SEND]()
         time.sleep(interval/1000)
-        return self.fetcher.get_intensity()
+        spec = self.spectrometer["values"].value
+        wls = self.spectrometer["wls"].value
+        idx = np.argmin(np.abs(wls - self[self.PARAM_FOCUS_WL].value))
+        print(wls[idx])
+        return spec[idx]
     
