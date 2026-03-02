@@ -354,12 +354,6 @@ class PhaseCorrector(pat.PatternGenerator):
     def define_actions(self):
         @pzp.action.define(self, "Get correction data")
         def get_calib_data():
-            # measure_piece = self.puzzle[self[self.PARAM_CALIB_PIECE_NAME].value]
-            # measure_piece[UniformAndBinaryCalib.PARAM_MODE].set_value(UniformAndBinaryCalib.MODE_GRAY)
-            # measure_piece[UniformAndBinaryCalib.PARAM_NORMALIZE].set_value(UniformAndBinaryCalib.NORM_PER_WL)
-            # measure_piece.actions[UniformAndBinaryCalib.ACTION_MEASURE]()
-            # data = measure_piece[UniformAndBinaryCalib.PARAM_CALIB_DATA].value
-            # wls = measure_piece[UniformAndBinaryCalib.PARAM_CALIB_WL].value
             df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
             data = df.values  # Spectrums
             contrasts_loaded = df.index.to_numpy()
@@ -376,6 +370,31 @@ class PhaseCorrector(pat.PatternGenerator):
                 calib = data[:, calib_idx]
                 colbycol_calib.append(calib)
             self[self.PARAM_CORRECTION].set_value(np.stack(colbycol_calib))
+
+        @pzp.action.define(self, "Show correction function")
+        def plot():
+            correction_data = self[self.PARAM_CORRECTION].value
+            grayscales = self[self.PARAM_GRAYSCALES].value
+            max_wl, min_wl = self[self.PARAM_MAX_WL].value, self[self.PARAM_MIN_WL].value
+            ignore = self[self.PARAM_IGNORE].value
+            ignore_b = self[self.PARAM_IGNORE_B].value
+            pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.T * 2*np.pi / 1024
+            wls = np.zeros(pattern.shape[0])
+            plot_data = []            
+            for col in range(pattern.shape[0]):
+                wls[col] = min_wl + (max_wl - min_wl)*col/pattern.shape[0]
+                grayscale, phase = map_grayscale_to_phase(grayscales, correction_data[col], ignore, ignore_b)
+                f = build_phase_to_grayscale_interpolator(phase, grayscale)
+                plot_data.append(f(np.linspace(0, 2*np.pi)))
+            
+            plt.figure()
+            plt.imshow(np.array(plot_data), origin="lower", aspect="auto", extent=[min_wl, max_wl, 0, 1023]) 
+            plt.xlabel("Wavelength (nm)")
+            plt.ylabel("Original grayscale")
+            plt.title("Calibration function plot")
+            plt.show()
+
+
         super().define_actions()
 
     def generate_pattern(self, slm_dim):
@@ -396,7 +415,59 @@ class PhaseCorrector(pat.PatternGenerator):
             corrected_grayscales.append(corrected_grayscale)
         corrected_pattern = np.stack(corrected_grayscales).T.astype(int)  # So fix it here
         return corrected_pattern
+
+
+class WavelengthScanner(pzp.Piece):
+    PARAM_PAT_MULTIPLIER_NAME = "Pattern multiplier piece name"
+    PARAM_BINARY_NAME = "Binary grating piece name"
+    PARAM_SLIT_NAME = "Slit pattern piece name"
+    PARAM_SPEC_NAME = "Spectrometer piece name"
+    PARAM_INTERVAL = "Sampling interval (ms)"
+    PARAM_SAMPLE_NUM = "Sample nb."
+    PARAM_SAVE_NAME = "Save file name"
+
+    def define_params(self):
+        pzp.param.text(self, self.PARAM_PAT_MULTIPLIER_NAME, pat.PatternMultiplier.__name__, visible=False)(None)
+        pzp.param.text(self, self.PARAM_BINARY_NAME, pat.BinaryGratingPattern.__name__, visible=False)(None)
+        pzp.param.text(self, self.PARAM_SLIT_NAME, pat.SlitPattern.__name__, visible=False)(None)
+        pzp.param.text(self, self.PARAM_SPEC_NAME, OceanSpectrometer.__name__, visible=False)(None)
+        pzp.param.spinbox(self, self.PARAM_INTERVAL, 200, 1, 99999)(None)
+        pzp.param.spinbox(self, self.PARAM_SAMPLE_NUM, 30, 1, 99999)(None)
+        pzp.action.settings()
     
+    def define_actions(self):
+        slit_pattern: pat.SlitPattern = self.puzzle[self.PARAM_SLIT_NAME]
+        multiplier: pat.PatternMultiplier = self.puzzle[self[self.PARAM_PAT_MULTIPLIER_NAME].value]
+        multiplier[multiplier.PARAM_GEN1].set_value(self[self.PARAM_BINARY_NAME].value)
+        multiplier[multiplier.PARAM_GEN2].set_value(self[self.PARAM_SLIT_NAME].value)
+        spec: OceanSpectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
+        slm_dim = multiplier.check_slm_status()
+        vertical_slit = slit_pattern[slit_pattern.PARAM_VERTICAL].value
+        slm_length = slm_dim[1] if vertical_slit else slm_dim[0]
+        interval_ms = self[self.PARAM_INTERVAL].value
+        sample_nb= self[self.PARAM_SAMPLE_NUM].value
+        data = np.zeros(sample_nb)
+        col_indices = np.zeros(sample_nb)
+
+        for i in range(sample_nb):
+            slit_offset = int(-slm_length/2 + (i/sample_nb)*slm_length)
+            slit_pattern[slit_pattern.PARAM_OFFSET] = slit_offset
+            multiplier.actions[multiplier.ACTION_SEND]()
+            time.sleep(interval_ms / 1000)
+            spectrum = spec["values"].value
+            wls = spec["wls"].value
+            max_idx = np.argmax(spectrum)
+
+            data[i] = wls[max_idx]
+            col_indices[i] = int(slm_length * i/sample_nb)
+        util.save_csv(col_indices, data, self[self.PARAM_SAVE_NAME].value)        
+
+        plt.figure()
+        plt.plot(col_indices, data, 'k.-')
+        plt.xlabel("Column index")
+        plt.ylabel("Wavelength")
+        plt.title("Column vs Wavelength")
+        plt.show()
 
 
 class Polarizer45degHelper(pzp.Piece):
