@@ -3,6 +3,8 @@ from puzzlepiece.extras import hardware_tools as pht
 from pzp_hardware.generic.mixins import image_preview
 import numpy as np
 import SantecSLM.interface as itf
+from qtpy.QtWidgets import QApplication, QFileDialog
+import pandas as pd
 
 
 """ Puzzlepiece pieces designed for Santec SLM(especially 200)"""
@@ -31,6 +33,7 @@ class SLMPiece(image_preview.ImagePreview, pzp.Piece):
     PARAM_CONNECTED = "connected"
 
     ACTION_UPDATE_WL = "Update target wavelength and phase"
+    ACTION_CUSTOM_PAT = "Load custom pattern (csv)"
 
     def define_params(self):
         super().define_params()
@@ -87,6 +90,8 @@ class SLMPiece(image_preview.ImagePreview, pzp.Piece):
             slm_dim = self[SLMPiece.PARAM_SLM_DIMENSIONS].value.astype(int)
             if slm_dim[0] != value.shape[0] or slm_dim[1] != value.shape[1]:
                 raise ValueError(f"Pattern doesn't have dimension of SLM: SLM dim: {slm_dim}, pattern dim: {value.shape}")
+            if np.min(value) < 0 or np.max(value) > 1023:
+                raise ValueError(f"Pattern data contains invalid value. (Must be between 0 and 1023)")
             if not self.puzzle.debug:
                 rcode = self.puzzle.globals[SANTEC_SLM_API].SLM_Disp_Data(
                     self[SLMPiece.PARAM_DISPLAY_NB].value,
@@ -111,7 +116,26 @@ class SLMPiece(image_preview.ImagePreview, pzp.Piece):
             
             if self[SLMPiece.PARAM_WL_SAVE].value:
                 itf.check_error(slm.SLM_Ctrl_WriteAW(slm_nb), "Save Wavelength:")
-                
+        
+        @pzp.action.define(self, SLMPiece.ACTION_CUSTOM_PAT, visible=True)
+        def custom_pattern():
+            if not self.puzzle.debug and not self[self.PARAM_CONNECTED].value:
+                raise RuntimeError("SLM is not connected.")
+            # Ensure a QApplication exists (create one only if needed)
+            app = QApplication.instance()
+            if app is None:
+                app = QApplication([])
+            path, _ = QFileDialog.getOpenFileName(
+                None,
+                "Select csv pattern",
+                "",
+                "CSV (*.csv);;All files (*)"
+            )
+            if not path:
+                return
+            data = pd.read_csv(path, sep=None, engine="python").to_numpy()
+            self[self.PARAM_IMAGE].set_value(data)
+
         pzp.action.settings(self)
 
     def setup(self):

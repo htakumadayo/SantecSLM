@@ -4,6 +4,7 @@ import SantecSLM.patterns as pat
 import puzzlepiece as pzp
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 # in meters
@@ -271,6 +272,69 @@ class PatternMultiplier(PatternGenerator):
         new_pattern = (pattern1 * pattern2 * 1023).astype(int)
         return new_pattern
 
+
+class CalBinaryGratingPattern(PatternGenerator):
+    PARAM_INTENSITY = "Normalised intensity"
+    PARAM_PERIOD = "Period (px)"
+    PARAM_CALIB_FILE = "Calibration file name"
+    PARAM_WL_FILE = "Wavelength scan file name"
+    PARAM_CORRECTION = "correction data"
+    PARAM_GRAYSCALES = "contrasts"
+
+    def define_actions(self):
+        @pzp.action.define(self, "Load calibration data")
+        def a():
+            df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
+            data = df.values  # Spectrums
+            contrasts_loaded = df.index.to_numpy()
+            calib_wls = df.columns.to_numpy(dtype=float)
+
+            wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
+            scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
+
+            self[self.PARAM_GRAYSCALES].set_value(contrasts_loaded)
+            print(wls.shape, data.shape)
+            colbycol_calib = []
+            col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
+            columns = np.arange(col_nb)
+            wls = util.linear_interpolation(columns, scan_col, scan_wls, 999999)
+            calib_use_idx = np.argmin(np.abs(np.tile(calib_wls, (wls.shape[1], 1)).T - wls), axis=0)  # size=col_nb
+            colbycol_calib = data[:, calib_use_idx]
+
+            # for col in range(col_nb):
+            #     assumed_wl = util.linear_interpolation()
+            #     calib_idx = np.argmin(np.abs(wls - assumed_wl))
+            #     calib = data[:, calib_idx]
+            #     colbycol_calib.append(calib)
+            self[self.PARAM_CORRECTION].set_value(colbycol_calib)
+        
+        super().define_params()
+
+    def define_params(self):
+        pzp.param.spinbox(self, self.PARAM_INTENSITY, 0.5, 0, 1.0)(None)
+        pzp.param.spinbox(self, self.PARAM_PERIOD, 25, 2, 1023)(None)
+        pzp.param.text(self, self.PARAM_CALIB_FILE, "binaryefficiency.csv", visible=False)(None)
+        pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv", visible=False)(None)
+        pzp.param.array(self, self.PARAM_CORRECTION, visible=False)(None)
+        pzp.param.array(self, self.PARAM_GRAYSCALES, visible=False)(None)
+        super().define_params()
+
+    def generate_pattern(self, slm_dim):
+        slm_dim = self.check_slm_status()
+        period = self[self.PARAM_PERIOD].value
+        calibration = self[self.PARAM_CORRECTION].value
+        duty_cycle = 0.5
+        pattern = np.zeros(slm_dim)
+        grayscales = self[self.PARAM_GRAYSCALES].value
+        target_intensity = self[self.PARAM_INTENSITY].value
+
+        for col in range(slm_dim[1]):
+            calib_data = calibration[:, col]
+            calib_data = calib_data / np.max(calib_data)
+            f = util.build_phase_to_grayscale_interpolator(calib_data, grayscales)
+            pattern[np.arange(0, slm_dim[0])%period < period*duty_cycle, col] = f(target_intensity)
+                
+        return pattern 
 
 class BeamShaper(PatternGenerator):
     def define_params(self):

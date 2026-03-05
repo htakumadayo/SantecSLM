@@ -150,6 +150,7 @@ class UniformAndBinaryCalib(pzp.Piece):
     PARAM_UNIFORM_NAME = "Uniform pattern piece name"
     PARAM_BINARY_NAME = "Binary grating pattern piece name"
     PARAM_CORRECTOR_NAME = "Pattern corrector piece name"
+    PARAM_CALIB_BINARY_NAME = "Calibrated binary grating piece name"
 
     MODE_EFF = "BinaryEfficiency"
     MODE_GRAY = "GrayscaleCalibration"
@@ -176,6 +177,7 @@ class UniformAndBinaryCalib(pzp.Piece):
         pzp.param.text(self, self.PARAM_UNIFORM_NAME, pat.UniformPattern.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_BINARY_NAME, pat.BinaryGratingPattern.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_CORRECTOR_NAME, PhaseCorrector.__name__, visible=False)(None)
+        pzp.param.text(self, self.PARAM_CALIB_BINARY_NAME, pat.CalBinaryGratingPattern.__name__, visible=False)(None)
         pzp.action.settings(self)
 
     def define_actions(self):
@@ -238,91 +240,53 @@ class UniformAndBinaryCalib(pzp.Piece):
             plt.show()
 
             df = pd.DataFrame(spectrums, index=contrasts, columns=effective_wls)
-            df.to_csv(f"{save_name}.csv")
+            df.to_csv(f"{save_name}")
 
+        @pzp.action.define(self, "Scan with calibrated binary")
+        def scan_cb():
+            sample_nb = self[self.PARAM_SAMPLE_NB].value
+            min_wl, max_wl = self[self.PARAM_MIN_WL].value, self[self.PARAM_MAX_WL].value
+            wait_time = self[self.PARAM_CAPT_INTERVAL].value / 1000
+            grating: pat.CalBinaryGratingPattern = self.puzzle[self[self.PARAM_CALIB_BINARY_NAME].value]
+            spec: OceanSpectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
+            save_name = self[self.PARAM_FILENAME].value
 
-def extract_one_cos2_period(grayscale, intensities, ignore_from_beginning=1):
-    x = grayscale
-    y = intensities
-    slopes = np.sign(np.diff(y, append=y[-1]))
-    
-    exclude_first = np.ones_like(y, dtype=bool)
-    exclude_first[:ignore_from_beginning+1] = 0    
-    intensity_diff = np.abs(y - y[0])
-    same_slope = (slopes == slopes[0]) & exclude_first
-    intensity_diff_masked = intensity_diff[same_slope]
-    idx_masked = np.arange(y.size)[same_slope]
+            spec_wavelengths = spec["wls"].value
+            spec_mask = (min_wl <= spec_wavelengths) & (spec_wavelengths <= max_wl)
+            effective_wls = spec_wavelengths[spec_mask]
 
-    end_idx = idx_masked[np.argmin(intensity_diff_masked)]
-    return x[0:end_idx], y[0:end_idx]
-    
+            contrasts = np.linspace(0, 1, sample_nb).astype(int)
+            spectrums = [None] * sample_nb 
 
-def map_grayscale_to_phase(grayscales, intensities, ignored_samples=1, ignored_from_beginning=1):
-    # Preprocess input to extract one period and shift so that index 0 is maximum
-    x, y = extract_one_cos2_period(grayscales, intensities, ignored_from_beginning)
-    slopes = np.sign(np.diff(y, append=y[-1]+ (y[-1]-y[-2])))
-    cos = np.sqrt(y) * slopes * -1
-    raw_phase = 2*np.acos(cos)
+            for i, contrast in enumerate(contrasts):
+                grating[grating.PARAM_INTENSITY].set_value(contrast)
+                grating.actions[grating.ACTION_SEND]()
+                time.sleep(wait_time)
+                self.puzzle.process_events()
+                spectrums[i] = spec["values"].value[spec_mask]
+            spectrums = np.array(spectrums)
 
-    min_idx = np.argmin(y)
-    ignore_mask = np.ones_like(raw_phase, dtype=bool)
-    ignore_mask[min_idx-ignored_samples : min_idx+ignored_samples+1] = False
+            nm_per_wl = False
+            nm_all = False
+            if self[self.PARAM_NORMALIZE].value == self.NORM_PER_WL:
+                nm_per_wl = True
+                spectrums /= np.max(spectrums, axis=0)
+            elif self[self.PARAM_NORMALIZE].value == self.NORM_ALL:
+                nm_all = True
+                spectrums /= np.max(spectrums)
+            effective_wls = spec_wavelengths[spec_mask]
 
-    return x[ignore_mask], raw_phase[ignore_mask]
+            plt.imshow(spectrums, origin="lower", aspect="auto", extent=[np.min(effective_wls), np.max(effective_wls), 0, 1])
+            plt.xlabel("Wavelength (nm)")
+            plt.ylabel("Phase (Grayscale)")
+            cbar = plt.colorbar()
+            cbar.set_label(f"{"Relative" if nm_all or nm_per_wl else ""} Intensity {"per wavelength" if nm_per_wl else ""}")
+            plt.savefig(f"{save_name}.svg")
+            plt.show()
 
-def linear_interpolation(target, x, y, maximum=1023):
-    """
-    Given two arrays that (discretely) represent some function, apply that function to a given array 
-    using linear interpolation.
-    
-    :param target: Array that you want to apply the function to.
-    :param x: Arguments
-    :param y: Images correspondting to the arguments
-    """
-    if np.min(target) < np.min(x):
-        raise ValueError("Linear interpolation failed: Some target values not in range of x")
+            df = pd.DataFrame(spectrums, index=contrasts, columns=effective_wls)
+            df.to_csv(f"{save_name}")
 
-    # Find what coefficients to use
-    diff = np.tile(x, (target.size, 1)).T - target
-    # interp_coef_idx = np.argmax(diff > 0, axis=0) - 1
-    interp_coef_idx = x.size - np.argmax(diff[::-1, :] <= 0, axis=0) - 1
-    interp_coef_idx[target > np.max(x)] -= 1  # target x bigger than np.max(s) use last interpolation slope
-    # Repeat last value to avoid indexing issues
-    x = np.append(x, x[-1] + 1)  # Avoid divison by zero
-    y = np.append(y, y[-1])
-    
-    # Interpolation formula
-    slope = (y[interp_coef_idx + 1] - y[interp_coef_idx]) / (x[interp_coef_idx + 1] - x[interp_coef_idx])
-    result = y[interp_coef_idx] + (target - x[interp_coef_idx])*slope
-    result[result > maximum] = maximum  # Clamp
-    return result
-
-def build_phase_to_grayscale_interpolator(phases, grayscales, period=2*np.pi):
-    """
-    Build a phase->grayscale linear interpolator that handles 2π wrapping.
-
-    Parameters
-    ----------
-    phases : array_like
-        Measured phases in radians (wrapped to [0, 2π) or close).
-    grayscales : array_like
-        Corresponding grayscale values (same length).
-    period : float
-        Phase period (default 2π).
-
-    Returns
-    -------
-    f : callable
-        f(phi) returns interpolated grayscale for phase(s) phi (radians).
-    """
-    
-    # First remove the 2pi wrap
-    phases = (phases - phases[0]) % period + phases[0]
-
-    def f(phi):
-        phi[phi < phases[0]] += period
-        return linear_interpolation(phi, phases, grayscales)
-    return f
 
 
 
@@ -383,8 +347,8 @@ class PhaseCorrector(pat.PatternGenerator):
             plot_data = []            
             for col in range(pattern.shape[0]):
                 wls[col] = min_wl + (max_wl - min_wl)*col/pattern.shape[0]
-                grayscale, phase = map_grayscale_to_phase(grayscales, correction_data[col], ignore, ignore_b)
-                f = build_phase_to_grayscale_interpolator(phase, grayscale)
+                grayscale, phase = util.map_grayscale_to_phase(grayscales, correction_data[col], ignore, ignore_b)
+                f = util.build_phase_to_grayscale_interpolator(phase, grayscale)
                 plot_data.append(f(np.linspace(0, 2*np.pi)))
             
             plt.figure()
@@ -407,8 +371,8 @@ class PhaseCorrector(pat.PatternGenerator):
         corrected_grayscales = []
         for row in range(pattern.shape[0]):  # I realized later that wavelengths are spread along axis 1 and not 0
             inverted_row = correction_data.shape[0] - row - 1
-            grayscale, phase = map_grayscale_to_phase(grayscales, correction_data[row if not inverted else inverted_row,:], ignore, ignore_b)
-            f = build_phase_to_grayscale_interpolator(phase, grayscale)
+            grayscale, phase = util.map_grayscale_to_phase(grayscales, correction_data[row if not inverted else inverted_row,:], ignore, ignore_b)
+            f = util.build_phase_to_grayscale_interpolator(phase, grayscale)
 
             # corrected_grayscale = linear_interpolation(pattern[row, :], phase, grayscale)
             corrected_grayscale = f(pattern[row, :])
