@@ -425,6 +425,8 @@ class WavelengthScanner(pzp.Piece):
     PARAM_INTERVAL = "Sampling interval (ms)"
     PARAM_SAMPLE_NUM = "Sample nb."
     PARAM_SAVE_NAME = "Save file name"
+    PARAM_MAX_WL = "Max WL kept (nm)"
+    PARAM_MIN_WL = "Min WL kept (nm)"
 
     def define_params(self):
         pzp.param.text(self, self.PARAM_PAT_MULTIPLIER_NAME, pat.PatternMultiplier.__name__, visible=False)(None)
@@ -433,41 +435,53 @@ class WavelengthScanner(pzp.Piece):
         pzp.param.text(self, self.PARAM_SPEC_NAME, OceanSpectrometer.__name__, visible=False)(None)
         pzp.param.spinbox(self, self.PARAM_INTERVAL, 200, 1, 99999)(None)
         pzp.param.spinbox(self, self.PARAM_SAMPLE_NUM, 30, 1, 99999)(None)
-        pzp.action.settings()
+        pzp.param.spinbox(self, self.PARAM_MAX_WL, 99999, 1, 9999999)(None)
+        pzp.param.spinbox(self, self.PARAM_MIN_WL, 0, 1, 9999999)(None)
+        pzp.param.text(self, self.PARAM_SAVE_NAME, "wl_scan.csv")(None)
+        pzp.action.settings(self)
     
     def define_actions(self):
-        slit_pattern: pat.SlitPattern = self.puzzle[self.PARAM_SLIT_NAME]
-        multiplier: pat.PatternMultiplier = self.puzzle[self[self.PARAM_PAT_MULTIPLIER_NAME].value]
-        multiplier[multiplier.PARAM_GEN1].set_value(self[self.PARAM_BINARY_NAME].value)
-        multiplier[multiplier.PARAM_GEN2].set_value(self[self.PARAM_SLIT_NAME].value)
-        spec: OceanSpectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
-        slm_dim = multiplier.check_slm_status()
-        vertical_slit = slit_pattern[slit_pattern.PARAM_VERTICAL].value
-        slm_length = slm_dim[1] if vertical_slit else slm_dim[0]
-        interval_ms = self[self.PARAM_INTERVAL].value
-        sample_nb= self[self.PARAM_SAMPLE_NUM].value
-        data = np.zeros(sample_nb)
-        col_indices = np.zeros(sample_nb)
+        @pzp.action.define(self, "Scan")
+        def aaa():
+            slit_pattern: pat.SlitPattern = self.puzzle[self[self.PARAM_SLIT_NAME].value]
+            multiplier: pat.PatternMultiplier = self.puzzle[self[self.PARAM_PAT_MULTIPLIER_NAME].value]
+            multiplier[multiplier.PARAM_GEN1].set_value(self[self.PARAM_BINARY_NAME].value)
+            multiplier[multiplier.PARAM_GEN2].set_value(self[self.PARAM_SLIT_NAME].value)
+            spec: OceanSpectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
+            slm_dim = multiplier.check_slm_status()
+            vertical_slit = slit_pattern[slit_pattern.PARAM_VERTICAL].value
+            slm_length = slm_dim[1] if vertical_slit else slm_dim[0]
+            interval_ms = self[self.PARAM_INTERVAL].value
+            max_wl = self[self.PARAM_MAX_WL].value
+            min_wl = self[self.PARAM_MIN_WL].value
+            sample_nb= self[self.PARAM_SAMPLE_NUM].value
+            
+            data = np.zeros(sample_nb)
+            col_indices = np.zeros(sample_nb)
 
-        for i in range(sample_nb):
-            slit_offset = int(-slm_length/2 + (i/sample_nb)*slm_length)
-            slit_pattern[slit_pattern.PARAM_OFFSET] = slit_offset
-            multiplier.actions[multiplier.ACTION_SEND]()
-            time.sleep(interval_ms / 1000)
-            spectrum = spec["values"].value
-            wls = spec["wls"].value
-            max_idx = np.argmax(spectrum)
+            for i in range(sample_nb):
+                offset_from_left_edge = (i/sample_nb)*slm_length
+                slit_offset = int(-slm_length/2 + offset_from_left_edge)
+                slit_pattern[slit_pattern.PARAM_OFFSET].set_value(slit_offset)
+                multiplier.actions[multiplier.ACTION_SEND]()
+                time.sleep(interval_ms / 1000)
+                self.puzzle.process_events()
+                spectrum = spec["values"].value
+                wls = spec["wls"].value
+                mask = (min_wl <= wls) & (wls <= max_wl)
+                wls, spectrum = wls[mask], spectrum[mask]
 
-            data[i] = wls[max_idx]
-            col_indices[i] = int(slm_length * i/sample_nb)
-        util.save_csv(col_indices, data, self[self.PARAM_SAVE_NAME].value)        
+                max_idx = np.argmax(spectrum)
+                data[i] = wls[max_idx]
+                col_indices[i] = int(offset_from_left_edge)
+            util.save_csv(col_indices, data, self[self.PARAM_SAVE_NAME].value)        
 
-        plt.figure()
-        plt.plot(col_indices, data, 'k.-')
-        plt.xlabel("Column index")
-        plt.ylabel("Wavelength")
-        plt.title("Column vs Wavelength")
-        plt.show()
+            plt.figure()
+            plt.plot(col_indices, data, 'k.-')
+            plt.xlabel("Column index")
+            plt.ylabel("Wavelength")
+            plt.title("Column vs Wavelength")
+            plt.show()
 
 
 class Polarizer45degHelper(pzp.Piece):
