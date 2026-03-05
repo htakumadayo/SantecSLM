@@ -259,7 +259,7 @@ class UniformAndBinaryCalib(pzp.Piece):
             spectrums = [None] * sample_nb 
 
             for i, contrast in enumerate(contrasts):
-                grating[grating.PARAM_INTENSITY].set_value(contrast)
+                grating[grating.PARAM_ATTN].set_value(contrast)
                 grating.actions[grating.ACTION_SEND]()
                 time.sleep(wait_time)
                 self.puzzle.process_events()

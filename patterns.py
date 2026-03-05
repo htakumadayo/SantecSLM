@@ -274,7 +274,7 @@ class PatternMultiplier(PatternGenerator):
 
 
 class CalBinaryGratingPattern(PatternGenerator):
-    PARAM_INTENSITY = "Normalised intensity"
+    PARAM_ATTN = "Attenuation"
     PARAM_PERIOD = "Period (px)"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_WL_FILE = "Wavelength scan file name"
@@ -293,12 +293,11 @@ class CalBinaryGratingPattern(PatternGenerator):
             scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
 
             self[self.PARAM_GRAYSCALES].set_value(contrasts_loaded)
-            print(wls.shape, data.shape)
             colbycol_calib = []
             col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
             columns = np.arange(col_nb)
             wls = util.linear_interpolation(columns, scan_col, scan_wls, 999999)
-            calib_use_idx = np.argmin(np.abs(np.tile(calib_wls, (wls.shape[1], 1)).T - wls), axis=0)  # size=col_nb
+            calib_use_idx = np.argmin(np.abs(np.tile(calib_wls, (wls.size, 1)).T - wls), axis=0)  # size=col_nb
             colbycol_calib = data[:, calib_use_idx]
 
             # for col in range(col_nb):
@@ -308,13 +307,13 @@ class CalBinaryGratingPattern(PatternGenerator):
             #     colbycol_calib.append(calib)
             self[self.PARAM_CORRECTION].set_value(colbycol_calib)
         
-        super().define_params()
+        super().define_actions()
 
     def define_params(self):
-        pzp.param.spinbox(self, self.PARAM_INTENSITY, 0.5, 0, 1.0)(None)
+        pzp.param.spinbox(self, self.PARAM_ATTN, 0.5, 0, 1.0)(None)
         pzp.param.spinbox(self, self.PARAM_PERIOD, 25, 2, 1023)(None)
-        pzp.param.text(self, self.PARAM_CALIB_FILE, "binaryefficiency.csv", visible=False)(None)
-        pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv", visible=False)(None)
+        pzp.param.text(self, self.PARAM_CALIB_FILE, "binaryefficiency.csv")(None)
+        pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv")(None)
         pzp.param.array(self, self.PARAM_CORRECTION, visible=False)(None)
         pzp.param.array(self, self.PARAM_GRAYSCALES, visible=False)(None)
         super().define_params()
@@ -326,13 +325,14 @@ class CalBinaryGratingPattern(PatternGenerator):
         duty_cycle = 0.5
         pattern = np.zeros(slm_dim)
         grayscales = self[self.PARAM_GRAYSCALES].value
-        target_intensity = self[self.PARAM_INTENSITY].value
+        target_attn = self[self.PARAM_ATTN].value
 
         for col in range(slm_dim[1]):
             calib_data = calibration[:, col]
             calib_data = calib_data / np.max(calib_data)
-            f = util.build_phase_to_grayscale_interpolator(calib_data, grayscales)
-            pattern[np.arange(0, slm_dim[0])%period < period*duty_cycle, col] = f(target_intensity)
+            grayscale, phase = util.map_grayscale_to_phase(grayscales, calib_data, 1, 2)
+            f = util.build_phase_to_grayscale_interpolator(phase, grayscale)
+            pattern[np.arange(0, slm_dim[0])%period < period*duty_cycle, col] = f(np.array([target_attn*2*np.pi/2]))[0]
                 
         return pattern 
 

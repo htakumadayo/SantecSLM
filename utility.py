@@ -144,5 +144,5 @@ def build_phase_to_grayscale_interpolator(phases, grayscales, period=2*np.pi):
 
     def f(phi):
         phi[phi < phases[0]] += period
-        return util.linear_interpolation(phi, phases, grayscales)
+        return linear_interpolation(phi, phases, grayscales)
     return f
