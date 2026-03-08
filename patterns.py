@@ -276,6 +276,7 @@ class PatternMultiplier(PatternGenerator):
 
 class CalBinaryGratingPattern(PatternGenerator):
     PARAM_INT = "Spectral intensity formula"
+    PARAM_ATTN = "Attenuation"
     PARAM_PHASE = "Spectral phase formula"
     PARAM_PERIOD = "Period (px)"
     PARAM_CALIB_FILE = "Calibration file name"
@@ -345,8 +346,9 @@ class CalBinaryGratingPattern(PatternGenerator):
         super().define_actions()
 
     def define_params(self):
-        pzp.param.text(self, self.PARAM_INT, "1")(None)
-        pzp.param.text(self, self.PARAM_PHASE, "0")(None)
+        # pzp.param.text(self, self.PARAM_INT, "1")(None)
+        # pzp.param.text(self, self.PARAM_PHASE, "0")(None)
+        pzp.param.spinbox(self, self.PARAM_ATTN, 0.5, 0, 1.0)(None)
         pzp.param.spinbox(self, self.PARAM_PERIOD, 25, 2, 1023)(None)
         pzp.param.text(self, self.PARAM_CALIB_FILE, "binaryefficiency.csv")(None)
         pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv")(None)
