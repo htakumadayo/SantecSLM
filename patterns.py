@@ -5,6 +5,7 @@ import puzzlepiece as pzp
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from scipy.optimize import curve_fit
 
 
 # in meters
@@ -274,67 +275,93 @@ class PatternMultiplier(PatternGenerator):
 
 
 class CalBinaryGratingPattern(PatternGenerator):
-    PARAM_ATTN = "Attenuation"
+    PARAM_INT = "Spectral intensity formula"
+    PARAM_PHASE = "Spectral phase formula"
     PARAM_PERIOD = "Period (px)"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_WL_FILE = "Wavelength scan file name"
-    PARAM_CORRECTION = "correction data"
-    PARAM_GRAYSCALES = "contrasts"
 
     def define_actions(self):
         @pzp.action.define(self, "Load calibration data")
         def a():
             df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
             data = df.values  # Spectrums
-            contrasts_loaded = df.index.to_numpy()
+            grayscales = df.index.to_numpy()
             calib_wls = df.columns.to_numpy(dtype=float)
 
+            # Determine what wavelength correspond to what column
             wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
             scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
 
-            self[self.PARAM_GRAYSCALES].set_value(contrasts_loaded)
             colbycol_calib = []
             col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
             columns = np.arange(col_nb)
             wls = util.linear_interpolation(columns, scan_col, scan_wls, 999999)
-            calib_use_idx = np.argmin(np.abs(np.tile(calib_wls, (wls.size, 1)).T - wls), axis=0)  # size=col_nb
-            colbycol_calib = data[:, calib_use_idx]
+            calib_use_col = np.argmin(np.abs(np.tile(calib_wls, (wls.size, 1)).T - wls), axis=0)  # size=col_nb
+            self.correction_fct = []
 
-            # for col in range(col_nb):
-            #     assumed_wl = util.linear_interpolation()
-            #     calib_idx = np.argmin(np.abs(wls - assumed_wl))
-            #     calib = data[:, calib_idx]
-            #     colbycol_calib.append(calib)
-            self[self.PARAM_CORRECTION].set_value(colbycol_calib)
+            # Perform fit 
+            for col in calib_use_col: 
+                fit_data = data[:, col]
+                min_idx = np.argmin(fit_data) + int(0.15*fit_data.shape[0])
+                fit_data = fit_data[:min_idx]
+                fit_contrasts = grayscales[:min_idx]
+
+                A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
+                E0,F0,G0,H0 = A0/15, B0, 0, 0
+                p0 = [A0, B0, C0, D0, E0, F0, G0, H0]
+                cos2_model = lambda x,A,B,C,D,E,F,G,H: A*(np.cos(D*(x**2)+B*x + C)**2) + E*(np.cos(H*(x**2)+F*x + G)**4)
+                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
+
+                x_new = np.arange(0, 1024)
+                y_new = cos2_model(x_new, *popt)
+                y_new = y_new[:np.argmin(y_new)]
+                min_idx, max_idx = np.argmin(y_new), np.argmax(y_new)
+
+                lookup_begin, lookup_end = min(min_idx, max_idx), max(min_idx, max_idx)
+                lookup_x = x_new[lookup_begin:lookup_end]   
+                lookup_y = y_new[lookup_begin:lookup_end]
+                lookup_y_normalized = lookup_y/np.max(lookup_y)
+
+                def interp(intensities, lookup_y_normalized=lookup_y_normalized, lookup_x=lookup_x):
+                    return np.interp(intensities, lookup_y_normalized[::-1], lookup_x[::-1])  # Assumed max before min
+                self.correction_fct.append(interp)
+            return
+        
+        @pzp.action.define("Show calibration plot")
+        def b():
+            im = []
+            intensities = np.linspace(0, 1)
+            for fct in self.correction_fct:
+                im.append(fct(intensities))
+
+            plt.imshow(np.array(im).T, origin="lower", aspect="auto", extent=[0, len(self.correction_fct)-1, 0, 1])
+            plt.xlabel("SLM column")
+            plt.ylabel("Intensity")
+            cbar = plt.colorbar()
+            cbar.set_label(f"Contrast")
+            plt.show()
         
         super().define_actions()
 
     def define_params(self):
-        pzp.param.spinbox(self, self.PARAM_ATTN, 0.5, 0, 1.0)(None)
+        pzp.param.text(self, self.PARAM_INT, "1")(None)
+        pzp.param.text(self, self.PARAM_PHASE, "0")(None)
         pzp.param.spinbox(self, self.PARAM_PERIOD, 25, 2, 1023)(None)
         pzp.param.text(self, self.PARAM_CALIB_FILE, "binaryefficiency.csv")(None)
         pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv")(None)
-        pzp.param.array(self, self.PARAM_CORRECTION, visible=False)(None)
-        pzp.param.array(self, self.PARAM_GRAYSCALES, visible=False)(None)
         super().define_params()
 
     def generate_pattern(self, slm_dim):
         slm_dim = self.check_slm_status()
         period = self[self.PARAM_PERIOD].value
-        calibration = self[self.PARAM_CORRECTION].value
         duty_cycle = 0.5
         pattern = np.zeros(slm_dim)
-        grayscales = self[self.PARAM_GRAYSCALES].value
         target_attn = self[self.PARAM_ATTN].value
 
         for col in range(slm_dim[1]):
-            calib_data = calibration[:, col]
-            calib_data = calib_data / np.max(calib_data)
-            grayscale, phase = util.map_grayscale_to_phase(grayscales, calib_data, 1, 2)
-            f = util.build_phase_to_grayscale_interpolator(phase, grayscale)
-            pattern[np.arange(0, slm_dim[0])%period < period*duty_cycle, col] = f(np.array([target_attn*2*np.pi/2]))[0]
-                
-        return pattern 
+            pattern[np.arange(0, slm_dim[0])%period < period*duty_cycle, col] = self.correction_fct[col](target_attn)
+        return pattern
 
 class BeamShaper(PatternGenerator):
     def define_params(self):
