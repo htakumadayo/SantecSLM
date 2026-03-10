@@ -255,8 +255,16 @@ class UniformAndBinaryCalib(pzp.Piece):
             spec_mask = (min_wl <= spec_wavelengths) & (spec_wavelengths <= max_wl)
             effective_wls = spec_wavelengths[spec_mask]
 
-            contrasts = np.linspace(0, 1, sample_nb).astype(int)
+            contrasts = np.linspace(0, 1, sample_nb)
             spectrums = [None] * sample_nb 
+
+            grating[grating.PARAM_ATTN].set_value(0)
+            grating.actions[grating.ACTION_SEND]()
+            time.sleep(0.5)
+            self.puzzle.process_events()
+            time.sleep(0.5)
+            self.puzzle.process_events()
+
 
             for i, contrast in enumerate(contrasts):
                 grating[grating.PARAM_ATTN].set_value(contrast)
@@ -278,7 +286,7 @@ class UniformAndBinaryCalib(pzp.Piece):
 
             plt.imshow(spectrums, origin="lower", aspect="auto", extent=[np.min(effective_wls), np.max(effective_wls), 0, 1])
             plt.xlabel("Wavelength (nm)")
-            plt.ylabel("Phase (Grayscale)")
+            plt.ylabel("Target intensity")
             cbar = plt.colorbar()
             cbar.set_label(f"{"Relative" if nm_all or nm_per_wl else ""} Intensity {"per wavelength" if nm_per_wl else ""}")
             plt.savefig(f"{save_name}.svg")
@@ -294,24 +302,19 @@ class PhaseCorrector(pat.PatternGenerator):
     """
     Piece that corrects binary grating pattern based on calibration data from UniformAndBinaryCalib
     """
-    PARAM_MIN_WL = "Min. wavelength"
-    PARAM_MAX_WL = "Max. wavelength"
-    PARAM_IGNORE = "Ignored samples around min."
-    PARAM_IGNORE_B = "Ignored samples at beginning"
-    PARAM_CORRECTION = "Correction data"
+    PARAM_MIN_WL = "Min. wavelength considered"
+    PARAM_MAX_WL = "Max. wavelength considered"
+    PARAM_WL_FILE = "Wavelength scan file name"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_GRAYSCALES = "Grayscales"
-    PARAM_INVERT_CORRECTION_ORDER = "Invert correction order"
+    # PARAM_INVERT_CORRECTION_ORDER = "Invert correction order"
 
     def define_params(self):
-        pzp.param.spinbox(self, self.PARAM_MIN_WL, 1050, 1, 9999999)(None)
-        pzp.param.spinbox(self, self.PARAM_MAX_WL, 1400, 1, 9999999)(None)
-        pzp.param.spinbox(self, self.PARAM_IGNORE, 1, 0, 9999)(None)
-        pzp.param.spinbox(self, self.PARAM_IGNORE_B, 1, 0, 9999)(None)
-        pzp.param.checkbox(self, self.PARAM_INVERT_CORRECTION_ORDER, False)(None)
+        pzp.param.spinbox(self, self.PARAM_MIN_WL, 1179, 1, 9999999)(None)
+        pzp.param.spinbox(self, self.PARAM_MAX_WL, 1378, 1, 9999999)(None)
+        # pzp.param.checkbox(self, self.PARAM_INVERT_CORRECTION_ORDER, False)(None)
+        pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv")(None)
         # Column by column (per wavelength) correction data. Each index correcspond to a (2,N) shape matrix that contains calibration curve.
-        pzp.param.array(self, self.PARAM_CORRECTION, False)(None) 
-        pzp.param.array(self, self.PARAM_GRAYSCALES, False)(None)
         pzp.param.text(self, self.PARAM_CALIB_FILE, "a.csv", visible=True)(None)
         super().define_params()
 
@@ -320,65 +323,107 @@ class PhaseCorrector(pat.PatternGenerator):
         def get_calib_data():
             df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
             data = df.values  # Spectrums
-            contrasts_loaded = df.index.to_numpy()
-            wls = df.columns.to_numpy(dtype=float)
+            grayscales = df.index.to_numpy()
+            calib_wls = df.columns.to_numpy(dtype=float)
 
-            self[self.PARAM_GRAYSCALES].set_value(contrasts_loaded)
-            print(wls.shape, data.shape)
-            colbycol_calib = []
+            # Determine what wavelength correspond to what column
+            wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
+            scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
+
+            max_wl = self[self.PARAM_MAX_WL].value
+            min_wl = self[self.PARAM_MIN_WL].value
+
             col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
-            max_wl, min_wl = self[self.PARAM_MAX_WL].value, self[self.PARAM_MIN_WL].value
-            for col in range(col_nb):   # Are wavelengths scattered linearly?? -> Assume yes
-                assumed_wl = min_wl + col*(max_wl - min_wl)/col_nb
-                calib_idx = np.argmin(np.abs(wls - assumed_wl))
-                calib = data[:, calib_idx]
-                colbycol_calib.append(calib)
-            self[self.PARAM_CORRECTION].set_value(np.stack(colbycol_calib))
+            columns = np.arange(col_nb)
+            print(columns.shape, wl_scan.shape)
+            wls = np.interp(columns, scan_col, scan_wls)
+            self.correction_fct = []  # Phase to grayscale
+
+            # Perform fit 
+            for wl in wls: 
+                col = np.argmin(np.abs(calib_wls - wl))
+                # print(f'{col}, {calib_wls[col]}', end=" $ ")
+                if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
+                    # print("Fuck")
+                    self.correction_fct.append(lambda _: np.zeros_like(_))
+                    continue
+                fit_data = data[:, col]
+                min_idx = np.argmin(fit_data) + int(0.15*fit_data.shape[0])
+                fit_data = fit_data[:min_idx]
+                fit_contrasts = grayscales[:min_idx]
+
+                A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
+                p0 = [A0, B0, C0, D0]
+                cos2_model = lambda x,A,B,C,D: A*(np.cos(D*(x**2)+B*x + C)**2)
+                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
+
+                def ph(gs, A,B,C,D):
+                    return D*(gs**2)+B*gs + C
+                                  
+                def f(naive_grayscale, popt=popt):
+                    dummy_gs = np.linspace(0, 1023, 150)
+                    dummy_ph = ph(dummy_gs, *popt)
+                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs)
+                self.correction_fct.append(f)
+            return
 
         @pzp.action.define(self, "Show correction function")
         def plot():
-            correction_data = self[self.PARAM_CORRECTION].value
-            grayscales = self[self.PARAM_GRAYSCALES].value
-            max_wl, min_wl = self[self.PARAM_MAX_WL].value, self[self.PARAM_MIN_WL].value
-            ignore = self[self.PARAM_IGNORE].value
-            ignore_b = self[self.PARAM_IGNORE_B].value
-            pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.T * 2*np.pi / 1024
-            wls = np.zeros(pattern.shape[0])
-            plot_data = []            
-            for col in range(pattern.shape[0]):
-                wls[col] = min_wl + (max_wl - min_wl)*col/pattern.shape[0]
-                grayscale, phase = util.map_grayscale_to_phase(grayscales, correction_data[col], ignore, ignore_b)
-                f = util.build_phase_to_grayscale_interpolator(phase, grayscale)
-                plot_data.append(f(np.linspace(0, 2*np.pi)))
+            slm_dim = self.check_slm_status()
+            plot_data = []
+            df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
+            data = df.values  # Spectrums
+            grayscales = df.index.to_numpy()
+            calib_wls = df.columns.to_numpy(dtype=float)
+
+            max_wl = self[self.PARAM_MAX_WL].value
+            min_wl = self[self.PARAM_MIN_WL].value
+
+            for wl in range(min_wl, max_wl, 2):
+                col = np.argmin(np.abs(calib_wls - wl))
+                # print(f'{col}, {calib_wls[col]}', end=" $ ")
+                if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
+                    # print("Fuck")
+                    self.correction_fct.append(lambda _: np.zeros_like(_))
+                    continue
+                fit_data = data[:, col]
+                min_idx = np.argmin(fit_data) + int(0.15*fit_data.shape[0])
+                fit_data = fit_data[:min_idx]
+                fit_contrasts = grayscales[:min_idx]
+
+                A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
+                p0 = [A0, B0, C0, D0]
+                cos2_model = lambda x,A,B,C,D: A*(np.cos(D*(x**2)+B*x + C)**2)
+                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
+
+                def ph(gs, A,B,C,D):
+                    return D*(gs**2)+B*gs + C
+                                  
+                def f(naive_grayscale, popt=popt):
+                    dummy_gs = np.linspace(0, 1023, 150)
+                    dummy_ph = ph(dummy_gs, *popt)
+                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs)
+                plot_data.append(f(np.linspace(0,1023)))
             
             plt.figure()
-            plt.imshow(np.array(plot_data), origin="lower", aspect="auto", extent=[min_wl, max_wl, 0, 1023]) 
-            plt.xlabel("Wavelength (nm)")
-            plt.ylabel("Original grayscale")
+            plt.imshow(np.array(plot_data).T, origin="lower", aspect="auto", extent=[min_wl, max_wl, 0, 2*np.pi]) 
+            plt.xlabel("SLM column")
+            plt.ylabel("Target phase")
+            cbar = plt.colorbar()
+            cbar.set_label(f"Calibrated grayscale")
             plt.title("Calibration function plot")
             plt.show()
-
-
         super().define_actions()
 
     def generate_pattern(self, slm_dim):
-        pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.T * 2*np.pi / 1024
-        ignore = self[self.PARAM_IGNORE].value
-        ignore_b = self[self.PARAM_IGNORE_B].value
-        inverted = self[self.PARAM_INVERT_CORRECTION_ORDER].value
-        correction_data = self[self.PARAM_CORRECTION].value
-        grayscales = self[self.PARAM_GRAYSCALES].value
-        corrected_grayscales = []
-        for row in range(pattern.shape[0]):  # I realized later that wavelengths are spread along axis 1 and not 0
-            inverted_row = correction_data.shape[0] - row - 1
-            grayscale, phase = util.map_grayscale_to_phase(grayscales, correction_data[row if not inverted else inverted_row,:], ignore, ignore_b)
-            f = util.build_phase_to_grayscale_interpolator(phase, grayscale)
+        pattern = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value
+        new_pattern = []
 
-            # corrected_grayscale = linear_interpolation(pattern[row, :], phase, grayscale)
-            corrected_grayscale = f(pattern[row, :])
-            corrected_grayscales.append(corrected_grayscale)
-        corrected_pattern = np.stack(corrected_grayscales).T.astype(int)  # So fix it here
-        return corrected_pattern
+        for col_i in range(pattern.shape[1]):
+            new_pattern.append(self.correction_fct[col_i](pattern[:,col_i]))
+
+        corrected_pattern = np.array(new_pattern)
+        return corrected_pattern.T
 
 
 class WavelengthScanner(pzp.Piece):

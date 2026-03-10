@@ -281,6 +281,9 @@ class CalBinaryGratingPattern(PatternGenerator):
     PARAM_PERIOD = "Period (px)"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_WL_FILE = "Wavelength scan file name"
+    PARAM_MAX_WL = "Max. WL considered"
+    PARAM_MIN_WL = "Min. WL considered"
+    PARAM_LIMIT_CONTRAST = "Contrast limit"
 
     def define_actions(self):
         @pzp.action.define(self, "Load calibration data")
@@ -294,29 +297,44 @@ class CalBinaryGratingPattern(PatternGenerator):
             wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
             scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
 
-            colbycol_calib = []
+            max_wl = self[self.PARAM_MAX_WL].value
+            min_wl = self[self.PARAM_MIN_WL].value
+            contrast_lim = self[self.PARAM_LIMIT_CONTRAST].value
+
             col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
             columns = np.arange(col_nb)
-            wls = util.linear_interpolation(columns, scan_col, scan_wls, 999999)
-            calib_use_col = np.argmin(np.abs(np.tile(calib_wls, (wls.size, 1)).T - wls), axis=0)  # size=col_nb
+            print(columns.shape, wl_scan.shape)
+            wls = np.interp(columns, scan_col, scan_wls)
+            print(wls)
+            # wls = util.linear_interpolation(columns, scan_col, scan_wls, 999999)
+            # calib_use_idx = np.argmin(np.abs(np.tile(calib_wls, (wls.size, 1)).T - wls), axis=0)  # size=col_nb
             self.correction_fct = []
 
             # Perform fit 
-            for col in calib_use_col: 
+            for wl in wls: 
+                col = np.argmin(np.abs(calib_wls - wl))
+                # print(f'{col}, {calib_wls[col]}', end=" $ ")
+                if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
+                    # print("Fuck")
+                    self.correction_fct.append(lambda _: np.zeros_like(_))
+                    continue
                 fit_data = data[:, col]
                 min_idx = np.argmin(fit_data) + int(0.15*fit_data.shape[0])
                 fit_data = fit_data[:min_idx]
                 fit_contrasts = grayscales[:min_idx]
 
+                # A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
+                # E0,F0,G0,H0 = A0/15, B0, 0, 0
+                # p0 = [A0, B0, C0, D0, E0, F0, G0, H0]
+                # cos2_model = lambda x,A,B,C,D,E,F,G,H: A*(np.cos(D*(x**2)+B*x + C)**2) + E*(np.cos(H*(x**2)+F*x + G)**4)
                 A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
-                E0,F0,G0,H0 = A0/15, B0, 0, 0
-                p0 = [A0, B0, C0, D0, E0, F0, G0, H0]
-                cos2_model = lambda x,A,B,C,D,E,F,G,H: A*(np.cos(D*(x**2)+B*x + C)**2) + E*(np.cos(H*(x**2)+F*x + G)**4)
+                p0 = [A0, B0, C0, D0]
+                cos2_model = lambda x,A,B,C,D: A*(np.cos(D*(x**2)+B*x + C)**2)
                 popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
 
-                x_new = np.arange(0, 1024)
+                x_new = np.arange(0, contrast_lim)
                 y_new = cos2_model(x_new, *popt)
-                y_new = y_new[:np.argmin(y_new)]
+                y_new = y_new[:np.argmin(y_new) + 1]
                 min_idx, max_idx = np.argmin(y_new), np.argmax(y_new)
 
                 lookup_begin, lookup_end = min(min_idx, max_idx), max(min_idx, max_idx)
@@ -329,7 +347,7 @@ class CalBinaryGratingPattern(PatternGenerator):
                 self.correction_fct.append(interp)
             return
         
-        @pzp.action.define("Show calibration plot")
+        @pzp.action.define(self, "Show calibration plot")
         def b():
             im = []
             intensities = np.linspace(0, 1)
@@ -350,6 +368,9 @@ class CalBinaryGratingPattern(PatternGenerator):
         # pzp.param.text(self, self.PARAM_PHASE, "0")(None)
         pzp.param.spinbox(self, self.PARAM_ATTN, 0.5, 0, 1.0)(None)
         pzp.param.spinbox(self, self.PARAM_PERIOD, 25, 2, 1023)(None)
+        pzp.param.spinbox(self, self.PARAM_MIN_WL, 1179, 1, 9999999)(None)
+        pzp.param.spinbox(self, self.PARAM_MAX_WL, 1378, 1, 9999999)(None)
+        pzp.param.spinbox(self, self.PARAM_LIMIT_CONTRAST, 600, 0, 2000)(None)
         pzp.param.text(self, self.PARAM_CALIB_FILE, "binaryefficiency.csv")(None)
         pzp.param.text(self, self.PARAM_WL_FILE, "wavelengthscan.csv")(None)
         super().define_params()
@@ -369,61 +390,29 @@ class BeamShaper(PatternGenerator):
     def define_params(self):
         self.fetcher = util.CameraImageFetcher(self.puzzle)
         pzp.param.spinbox(self, "Period (px)", 29, 1, 1023)(None)
-        pzp.param.checkbox(self, "Use binary", False)(None)
         pzp.param.text(self, "Function to display", "1")(None)
         pzp.param.checkbox(self, "Sum along axis 0", False)(None)
         pzp.param.text(self, "Save file name", "woo.csv")(None)
+        super().define_params()
     
     def define_actions(self):
         @pzp.action.define(self, "Set background image")
         def set_background():
             self.fetcher.set_backbround()
+        super().define_actions()
 
-        @pzp.action.define(self, "Generate pattern")
-        def generate():
-            self.check_slm_status()
-            period = self["Period (px)"].value
-            binary = self.puzzle["BinaryGrating"]
-            blazed = self.puzzle["BlazedGrating"]
-            use_binary = self["Use binary"].value
-            if use_binary:
-                binary[pat.BinaryGrating.PARAM_DUTY_CYCLE].set_value(0.5)
-                binary[pat.BinaryGrating.PARAM_PERIOD].set_value(period)
-                binary[pat.BinaryGrating.PARAM_PHASE].set_value(1023)
-                binary.actions[pat.BinaryGrating.ACTION_SEND]()
-            else:
-                blazed["Period"].set_value(period)
-                blazed["Max phase"].set_value(1023)
-                blazed.actions[PatternGenerator.ACTION_SEND]()
-            
-            image = self.puzzle["SLM"]["image"].value.astype(float)
-            envelope_x = np.arange(0, image.shape[0])
-            envelope = np.array(eval(self["Function to display"].value, {"x": envelope_x, "np": np}))
-            if np.any(envelope < 0) or np.max(envelope) > 1:
-                raise ValueError("Returned function contains invalid value")
-            
-            if use_binary:
-                phase_multiplier = np.arccos(np.sqrt(envelope)) / np.pi
-            else:
-                raise RuntimeError("Not yet supported")
-            
-            image = (phase_multiplier * image.T).T
-            self.send_image_to_slm(image.astype(int))
-
-            X = 60
-            beam_distrib = np.exp(-0.5*((envelope_x - np.max(envelope_x)/2) / X)**2)
-            phase_mask = np.exp(1j*2*np.pi*phase_multiplier)
-            expected = np.fft.ifftshift(np.fft.ifft(beam_distrib * phase_mask))
-            plt.scatter(np.arange(expected.size), np.abs(expected)**2)
-            plt.title("Expected")
-            plt.show()
-
-        @pzp.action.define(self, "Analyze result")
-        def analyze():
-            camera_img = self.fetcher.get_processed_image()
-            integrated = np.sum(camera_img, axis=0 if self["Sum along axis 0"].value else 1)
-            np.savetxt(self["Save file name"].value, integrated)
-            plt.scatter(np.arange(0, integrated.size), integrated)
-            plt.xlabel("Position on camera (px)")
-            plt.ylabel("Intensity")
-            plt.show()
+    def generate_pattern(self, slm_dim):
+        self.check_slm_status()
+        period = self["Period (px)"].value
+        binary = self.puzzle[BinaryGratingPattern.__name__]
+        binary[BinaryGratingPattern.PARAM_DUTY_CYCLE].set_value(0.5)
+        binary[BinaryGratingPattern.PARAM_PERIOD].set_value(period)
+        binary[BinaryGratingPattern.PARAM_PHASE].set_value(0)
+        binary.actions[BinaryGratingPattern.ACTION_SEND]()
+        
+        image = self.puzzle[SLMPiece.__name__]["image"].value.astype(float)
+        envelope_x = np.arange(0, image.shape[1])
+        envelope = np.array(eval(self["Function to display"].value, {"x": envelope_x, "np": np})) % 1024
+        
+        image = np.tile(envelope, (image.shape[0], 1))
+        return image
