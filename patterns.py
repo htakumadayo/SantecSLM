@@ -179,7 +179,7 @@ class SlitPattern(PatternGenerator):
 
     def define_params(self):
         pzp.param.checkbox(self, self.PARAM_VERTICAL, 1)(None)
-        pzp.param.spinbox(self, self.PARAM_WIDTH, 50, 1, 1000, v_step=5)(None)
+        pzp.param.spinbox(self, self.PARAM_WIDTH, 50, 1, 99999, v_step=5)(None)
         pzp.param.spinbox(self, self.PARAM_OFFSET, 0.0, -1000, 1000, v_step=5)(None)
 
         pzp.param.checkbox(self, self.PARAM_DOUBLE, 0)(None)
@@ -390,9 +390,9 @@ class BeamShaper(PatternGenerator):
     def define_params(self):
         self.fetcher = util.CameraImageFetcher(self.puzzle)
         pzp.param.spinbox(self, "Period (px)", 29, 1, 1023)(None)
-        pzp.param.text(self, "Function to display", "1")(None)
-        pzp.param.checkbox(self, "Sum along axis 0", False)(None)
-        pzp.param.text(self, "Save file name", "woo.csv")(None)
+        pzp.param.spinbox(self, "Contrast", 512, 0, 1023)(None)
+        pzp.param.text(self, "Function to display (x=Frequency [THz])", "x")(None)
+        pzp.param.text(self, "WL scan file", "wl_scan.csv")(None)
         super().define_params()
     
     def define_actions(self):
@@ -404,15 +404,23 @@ class BeamShaper(PatternGenerator):
     def generate_pattern(self, slm_dim):
         self.check_slm_status()
         period = self["Period (px)"].value
+        contrast = self["Contrast"].value
         binary = self.puzzle[BinaryGratingPattern.__name__]
         binary[BinaryGratingPattern.PARAM_DUTY_CYCLE].set_value(0.5)
         binary[BinaryGratingPattern.PARAM_PERIOD].set_value(period)
-        binary[BinaryGratingPattern.PARAM_PHASE].set_value(0)
+        binary[BinaryGratingPattern.PARAM_PHASE].set_value(contrast)
         binary.actions[BinaryGratingPattern.ACTION_SEND]()
         
         image = self.puzzle[SLMPiece.__name__]["image"].value.astype(float)
-        envelope_x = np.arange(0, image.shape[1])
-        envelope = np.array(eval(self["Function to display"].value, {"x": envelope_x, "np": np})) % 1024
+
+        wl_scan = np.loadtxt(self["WL scan file"].value).T
+        scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
+
+        pattern_x = np.arange(0, image.shape[1], dtype=float)
+        pattern_wl = np.interp(pattern_x, scan_col, scan_wls)  # nm
+        pattern_freq = 2.997e5/pattern_wl  # 1e-12*2.997e8/(pattern_wl*1e-9)
+
+        envelope = np.array(eval(self["Function to display (x=Frequency [THz])"].value, {"x": pattern_freq, "np": np}), dtype=int) % 1024
         
         image = np.tile(envelope, (image.shape[0], 1))
         return image

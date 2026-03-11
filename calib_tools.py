@@ -339,8 +339,14 @@ class PhaseCorrector(pat.PatternGenerator):
             wls = np.interp(columns, scan_col, scan_wls)
             self.correction_fct = []  # Phase to grayscale
 
+            A_data = np.zeros_like(wls)
+            B_data = np.zeros_like(wls)
+            C_data = np.zeros_like(wls)
+            D_data = np.zeros_like(wls)
+
+
             # Perform fit 
-            for wl in wls: 
+            for i, wl in enumerate(wls): 
                 col = np.argmin(np.abs(calib_wls - wl))
                 # print(f'{col}, {calib_wls[col]}', end=" $ ")
                 if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
@@ -356,6 +362,10 @@ class PhaseCorrector(pat.PatternGenerator):
                 p0 = [A0, B0, C0, D0]
                 cos2_model = lambda x,A,B,C,D: A*(np.cos(D*(x**2)+B*x + C)**2)
                 popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
+                A_data[i] = popt[0]
+                B_data[i] = popt[1]
+                C_data[i] = popt[2]
+                D_data[i] = popt[3]
 
                 def ph(gs, A,B,C,D):
                     return D*(gs**2)+B*gs + C
@@ -363,8 +373,22 @@ class PhaseCorrector(pat.PatternGenerator):
                 def f(naive_grayscale, popt=popt):
                     dummy_gs = np.linspace(0, 1023, 150)
                     dummy_ph = ph(dummy_gs, *popt)
-                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs)
+                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs, period=1023)
                 self.correction_fct.append(f)
+            plt.figure()
+            plt.scatter(wls, A_data)
+            plt.title("A")
+            plt.figure()
+            plt.scatter(wls, B_data)
+            plt.title("B")
+            plt.figure()
+            plt.scatter(wls, C_data)
+            plt.title("C")
+            plt.figure()
+            plt.scatter(wls, D_data)
+            plt.title("D")
+            plt.show()
+            
             return
 
         @pzp.action.define(self, "Show correction function")
@@ -402,7 +426,7 @@ class PhaseCorrector(pat.PatternGenerator):
                 def f(naive_grayscale, popt=popt):
                     dummy_gs = np.linspace(0, 1023, 150)
                     dummy_ph = ph(dummy_gs, *popt)
-                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs)
+                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs, period=1023)
                 plot_data.append(f(np.linspace(0,1023)))
             
             plt.figure()
