@@ -14,6 +14,71 @@ from puzzlepiece.extras import hardware_tools as pht
 import pyqtgraph as pg
 
 
+class ParameterScanner(pzp.Piece):
+    """
+    Abstract piece to scan a given parameter.
+    """
+
+    PARAM_SCAN_PARAM = "Scan parameter"
+    PARAM_SCAN_TRIGGER = "Scan parameter trigger (\"None\" to skip)"
+    PARAM_SCAN_TARGET = "Scanned parameter"
+    PARAM_SCAN_MIN = "Start value"
+    PARAM_SCAN_MAX = "End value (inclusive)"
+    PARAM_SCAN_NB = "Sample nb"
+    PARAM_SCAN_INTERVAL = "Sampling interval (ms)"
+    PARAM_PROGRESS = "progress"
+
+    ACTION_SCAN = "Scan"
+
+    def __init__(self, puzzle):
+        super().__init__(puzzle)
+        self.stop = False
+        self.data_proc_f = lambda x: x
+        self.x = None
+        self.y = None
+
+    def define_params(self):
+        pzp.param.progress(self, self.PARAM_PROGRESS)(None)
+        pzp.param.text(self, self.PARAM_SCAN_PARAM, "piece:param", visible=False)(None)
+        pzp.param.text(self, self.PARAM_SCAN_TARGET, "piece:param", visible=False)(None)
+        pzp.param.text(self, self.PARAM_SCAN_TRIGGER, "piece:action", visible=False)
+        pzp.param.spinbox(self, self.PARAM_SCAN_MIN, 0.0, visible=False)(None)
+        pzp.param.spinbox(self, self.PARAM_SCAN_MAX, 1.0, visible=False)(None)
+        pzp.param.spinbox(self, self.PARAM_SCAN_NB, 30, v_min=1)(None)
+        pzp.param.spinbox(self, self.PARAM_SCAN_INTERVAL, 200.0, 1)(None)
+        
+
+    def define_actions(self):
+        @pzp.action.define(self, self.ACTION_SCAN)
+        def scan():
+            scan_param = pzp.parse.parse_params(self[self.PARAM_SCAN_PARAM].value, self.puzzle)
+            trigger_name = self[self.PARAM_SCAN_TRIGGER].value
+            scanned_param = pzp.parse.parse_params(self[self.PARAM_SCAN_TARGET].value, self.puzzle)
+            scan_min, scan_max = self[self.PARAM_SCAN_MIN].value, self[self.PARAM_SCAN_MAX].value
+            scan_nb, scan_int = self[self.PARAM_SCAN_NB].value, self[self.PARAM_SCAN_INTERVAL].value
+            progress = self[self.PARAM_PROGRESS]
+
+            scan_values = []
+            scan_data = []
+            self.stop = False
+            for i in progress.iter(range(0, scan_nb+1)):
+                value = scan_min + i*(scan_max - scan_min)/scan_nb
+                scan_param.set_value(value)
+                if trigger_name is not "None":
+                    pzp.parse.run(f"run:{trigger_name}", self.puzzle)
+
+                time.sleep(scan_int/1000)
+
+                data = scanned_param.get_value()
+                scan_values.append(value)
+                scan_data.append(data)
+                pzp.puzzle.process_events()    
+                if self.stop:
+                    break
+            self.x = np.array(scan_values)
+            self.y = np.array(scan_data) 
+        
+
 class OceanSpectrometer(pzp.Piece):
     """
     A very basic Piece for getting values and wavelengths from an OceanOptics
@@ -73,7 +138,7 @@ class OceanSpectrometer(pzp.Piece):
     def define_actions(self):
         @pzp.action.define(self, "Set background")
         def set_background():
-            self["background_spec"].set_value(self["values"].value)
+            self["background_spec"].set_value(self["values"].get_value())
             print("Background set.")
 
     @pzp.piece.ensurer
@@ -353,27 +418,46 @@ class PhaseCorrector(pat.PatternGenerator):
                     # print("Fuck")
                     self.correction_fct.append(lambda _: np.zeros_like(_))
                     continue
+                intensities = data[:, col]
                 fit_data = data[:, col]
-                min_idx = np.argmin(fit_data) + int(0.15*fit_data.shape[0])
-                fit_data = fit_data[:min_idx]
-                fit_contrasts = grayscales[:min_idx]
+                min_idx = np.argmin(fit_data)
+                fit_end_idx = min_idx + int(0.15*fit_data.shape[0])
+                fit_data = fit_data[:fit_end_idx]
+                fit_contrasts = grayscales[:fit_end_idx]
+                cos2_model = lambda x,A,B,C,D: A*(np.cos(B*x + C)**2)+D
 
-                A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
-                p0 = [A0, B0, C0, D0]
-                cos2_model = lambda x,A,B,C,D: A*(np.cos(D*(x**2)+B*x + C)**2)
-                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
-                A_data[i] = popt[0]
-                B_data[i] = popt[1]
-                C_data[i] = popt[2]
-                D_data[i] = popt[3]
+                # First half
+                A1 = np.max(fit_data) - np.min(fit_data)
+                B1 = np.pi/800      # rough guess for frequency
+                C1 = 0
+                D1 = 0
+                p1 = [A1,B1,C1,D1]
+                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p1)
 
-                def ph(gs, A,B,C,D):
-                    return D*(gs**2)+B*gs + C
-                                  
-                def f(naive_grayscale, popt=popt):
-                    dummy_gs = np.linspace(0, 1023, 150)
-                    dummy_ph = ph(dummy_gs, *popt)
-                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs, period=1023)
+                # Second half
+                after_min = intensities[min_idx:]
+                max_idx = np.argmax(after_min)
+                fit_end_idx2 = max_idx + int(0.15*fit_data.shape[0]) 
+                fit_data2 = after_min[:fit_end_idx2]
+                fit_contrasts2 = grayscales[min_idx:min_idx+fit_end_idx2]
+                A2 = np.max(fit_data) - np.min(fit_data)
+                B2 = np.pi/800      # rough guess for frequency
+                C2 = 0
+                D2 = 0
+                p2 = [A2,B2,C2,D2]
+                popt2, pcov = curve_fit(cos2_model, fit_contrasts2, fit_data2, p0=p2)
+                
+                test_contrasts = np.linspace(0, grayscales[fit_end_idx])
+                min_contrast_idx = np.argmin(cos2_model(test_contrasts, *popt))
+                min_contrast = test_contrasts[min_contrast_idx]
+
+                test_contrast = np.linspace(np.min(fit_contrasts2), np.max(fit_contrasts2))
+                max_contrast_idx = np.argmax(cos2_model(test_contrast, *popt2))
+                max_contrast = test_contrast[max_contrast_idx]
+
+                def f(contrasts, min_c=min_contrast, max_c=max_contrast):
+                    return np.interp(contrasts, np.array([0, 512, 1023]), np.array([0, min_c, max_c]))
+
                 self.correction_fct.append(f)
             plt.figure()
             plt.scatter(wls, A_data)
