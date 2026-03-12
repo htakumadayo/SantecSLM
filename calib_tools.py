@@ -494,23 +494,46 @@ class PhaseCorrector(pat.PatternGenerator):
                     # print("Fuck")
                     self.correction_fct.append(lambda _: np.zeros_like(_))
                     continue
+                intensities = data[:, col]
                 fit_data = data[:, col]
-                min_idx = np.argmin(fit_data) + int(0.15*fit_data.shape[0])
-                fit_data = fit_data[:min_idx]
-                fit_contrasts = grayscales[:min_idx]
+                min_idx = np.argmin(fit_data)
+                fit_end_idx = min_idx + int(0.15*fit_data.shape[0])
+                fit_data = fit_data[:fit_end_idx]
+                fit_contrasts = grayscales[:fit_end_idx]
+                cos2_model = lambda x,A,B,C,D: A*(np.cos(B*x + C)**2)+D
 
-                A0,B0,C0,D0 = np.max(fit_data) - np.min(fit_data), np.pi/800, 0, 0
-                p0 = [A0, B0, C0, D0]
-                cos2_model = lambda x,A,B,C,D: A*(np.cos(D*(x**2)+B*x + C)**2)
-                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p0)
+                # First half
+                A1 = np.max(fit_data) - np.min(fit_data)
+                B1 = np.pi/800      # rough guess for frequency
+                C1 = 0
+                D1 = 0
+                p1 = [A1,B1,C1,D1]
+                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p1)
 
-                def ph(gs, A,B,C,D):
-                    return D*(gs**2)+B*gs + C
-                                  
-                def f(naive_grayscale, popt=popt):
-                    dummy_gs = np.linspace(0, 1023, 150)
-                    dummy_ph = ph(dummy_gs, *popt)
-                    return np.interp(naive_grayscale, 1024*dummy_ph/np.pi, dummy_gs, period=1023)
+                # Second half
+                after_min = intensities[min_idx:]
+                max_idx = np.argmax(after_min)
+                fit_end_idx2 = max_idx + int(0.15*fit_data.shape[0]) 
+                fit_data2 = after_min[:fit_end_idx2]
+                fit_contrasts2 = grayscales[min_idx:min_idx+fit_end_idx2]
+                A2 = np.max(fit_data) - np.min(fit_data)
+                B2 = np.pi/800      # rough guess for frequency
+                C2 = 0
+                D2 = 0
+                p2 = [A2,B2,C2,D2]
+                popt2, pcov = curve_fit(cos2_model, fit_contrasts2, fit_data2, p0=p2)
+                
+                test_contrasts = np.linspace(0, grayscales[fit_end_idx])
+                min_contrast_idx = np.argmin(cos2_model(test_contrasts, *popt))
+                min_contrast = test_contrasts[min_contrast_idx]
+
+                test_contrast = np.linspace(np.min(fit_contrasts2), np.max(fit_contrasts2))
+                max_contrast_idx = np.argmax(cos2_model(test_contrast, *popt2))
+                max_contrast = test_contrast[max_contrast_idx]
+
+                def f(contrasts, min_c=min_contrast, max_c=max_contrast):
+                    return np.interp(contrasts, np.array([0, 512, 1023]), np.array([0, min_c, max_c]))
+
                 plot_data.append(f(np.linspace(0,1023)))
             
             plt.figure()
