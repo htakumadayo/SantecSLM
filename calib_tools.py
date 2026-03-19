@@ -20,11 +20,11 @@ class ParameterScanner(pzp.Piece):
     """
 
     PARAM_SCAN_PARAM = "Scan parameter"
-    PARAM_SCAN_TRIGGER = "Scan parameter trigger (\"None\" to skip)"
     PARAM_SCAN_TARGET = "Scanned parameter"
     PARAM_SCAN_MIN = "Start value"
     PARAM_SCAN_MAX = "End value (inclusive)"
     PARAM_SCAN_NB = "Sample nb"
+    PARAM_SCAN_REP = "Repeat scan parameter nb"
     PARAM_SCAN_INTERVAL = "Sampling interval (ms)"
     PARAM_PROGRESS = "progress"
 
@@ -41,22 +41,28 @@ class ParameterScanner(pzp.Piece):
         pzp.param.progress(self, self.PARAM_PROGRESS)(None)
         pzp.param.text(self, self.PARAM_SCAN_PARAM, "piece:param", visible=False)(None)
         pzp.param.text(self, self.PARAM_SCAN_TARGET, "piece:param", visible=False)(None)
-        pzp.param.text(self, self.PARAM_SCAN_TRIGGER, "piece:action", visible=False)
         pzp.param.spinbox(self, self.PARAM_SCAN_MIN, 0.0, visible=False)(None)
         pzp.param.spinbox(self, self.PARAM_SCAN_MAX, 1.0, visible=False)(None)
         pzp.param.spinbox(self, self.PARAM_SCAN_NB, 30, v_min=1)(None)
+        pzp.param.spinbox(self, self.PARAM_SCAN_REP, 1, 1, 1000000)(None)
         pzp.param.spinbox(self, self.PARAM_SCAN_INTERVAL, 200.0, 1)(None)
-        
 
     def define_actions(self):
-        @pzp.action.define(self, self.ACTION_SCAN)
+        @pzp.action.define(self, self.ACTION_SCAN,)
         def scan():
             scan_param = pzp.parse.parse_params(self[self.PARAM_SCAN_PARAM].value, self.puzzle)
-            trigger_name = self[self.PARAM_SCAN_TRIGGER].value
+            trigger = self[self.PARAM_SCAN_TRIGGER_CMD].value
             scanned_param = pzp.parse.parse_params(self[self.PARAM_SCAN_TARGET].value, self.puzzle)
             scan_min, scan_max = self[self.PARAM_SCAN_MIN].value, self[self.PARAM_SCAN_MAX].value
             scan_nb, scan_int = self[self.PARAM_SCAN_NB].value, self[self.PARAM_SCAN_INTERVAL].value
+            rep_nb = self[self.PARAM_SCAN_REP].value
             progress = self[self.PARAM_PROGRESS]
+
+            dummy = scanned_param.get_value()
+            if type(dummy) is np.ndarray:
+                init_value = np.zeros_like(dummy)
+            else:
+                init_value = 0
 
             scan_values = []
             scan_data = []
@@ -64,19 +70,26 @@ class ParameterScanner(pzp.Piece):
             for i in progress.iter(range(0, scan_nb+1)):
                 value = scan_min + i*(scan_max - scan_min)/scan_nb
                 scan_param.set_value(value)
-                if trigger_name is not "None":
-                    pzp.parse.run(f"run:{trigger_name}", self.puzzle)
+                if trigger is not "None":
+                    pzp.parse.run(trigger, self.puzzle)
 
-                time.sleep(scan_int/1000)
+                sum = init_value
+                for _ in range(rep_nb):
+                    time.sleep(scan_int/1000)
+                    sum += scanned_param.get_value()
+                    pzp.puzzle.process_events()
 
-                data = scanned_param.get_value()
+                data = sum/rep_nb
                 scan_values.append(value)
                 scan_data.append(data)
-                pzp.puzzle.process_events()    
                 if self.stop:
                     break
             self.x = np.array(scan_values)
             self.y = np.array(scan_data) 
+    
+    # Function executed before taking a sample (eg use to send phase pattern to SLM)
+    def trigger_scan(self):
+        pass
         
 
 class OceanSpectrometer(pzp.Piece):
@@ -188,23 +201,18 @@ class OceanSpectrometer(pzp.Piece):
 
 # TOdo? maybe also check what happens if we add offset to grating
 # Calibration 3: Binary grating efficiency.
-class UniformAndBinaryCalib(pzp.Piece):
+class BinaryCalib(ParameterScanner):
     """
     Piece that measures wavelength wise calibration data of the SLM. 2 modes are available; Grayscale calibration mode and Binary grating efficiency mode. 
     Uses OceanOptics spectrometer to fetch data.
     
-    Uniform pattern mode should be used with a 45deg polarizer (with respect to SLM operating axis) before and after SLM.
+    # Uniform pattern mode should be used with a 45deg polarizer (with respect to SLM operating axis) before and after SLM.
 
     Binary grating mode works only with a lens (at focal distance).
     
     :var Assumptions: Description
     :var arrays: Description
     """
-    PARAM_MODE = "Calibration mode"
-    PARAM_SAMPLE_NB = "Sample number"
-    PARAM_CAPT_INTERVAL = "Sampling interval (ms)"
-    PARAM_MAX_WL = "Max wavelength (nm)"
-    PARAM_MIN_WL = "Min wavelength (nm)"
     PARAM_NORMALIZE = "Normalize over"
     PARAM_FILENAME = "Save file name"
     PARAM_CALIB_DATA = "Calibration data"
@@ -212,13 +220,9 @@ class UniformAndBinaryCalib(pzp.Piece):
     PARAM_USE_CORRECTOR = "Apply phase correction"
 
     PARAM_SPEC_NAME = "Spectrometer piece name"
-    PARAM_UNIFORM_NAME = "Uniform pattern piece name"
     PARAM_BINARY_NAME = "Binary grating pattern piece name"
     PARAM_CORRECTOR_NAME = "Pattern corrector piece name"
     PARAM_CALIB_BINARY_NAME = "Calibrated binary grating piece name"
-
-    MODE_EFF = "BinaryEfficiency"
-    MODE_GRAY = "GrayscaleCalibration"
 
     NORM_NONE = "None"
     NORM_ALL = "All"
@@ -227,11 +231,6 @@ class UniformAndBinaryCalib(pzp.Piece):
     ACTION_MEASURE = "Measure"
 
     def define_params(self):
-        pzp.param.dropdown(self, self.PARAM_MODE, self.MODE_EFF)([self.MODE_EFF, self.MODE_GRAY])
-        pzp.param.spinbox(self, self.PARAM_SAMPLE_NB, 30, 1, 9999)(None)
-        pzp.param.spinbox(self, self.PARAM_CAPT_INTERVAL, 50.0, 0.05, 9999, v_step=5.0)(None)
-        pzp.param.spinbox(self, self.PARAM_MIN_WL, 1050, 1, 99999)(None)
-        pzp.param.spinbox(self, self.PARAM_MAX_WL, 1550, 1, 99999)(None)
         pzp.param.dropdown(self, self.PARAM_NORMALIZE, self.NORM_NONE)([self.NORM_NONE, self.NORM_ALL, self.NORM_PER_WL])
         pzp.param.checkbox(self, self.PARAM_USE_CORRECTOR, False)(None)
         pzp.param.text(self, self.PARAM_FILENAME, f"calib{self.MODE_EFF}.csv")(None)
@@ -239,129 +238,53 @@ class UniformAndBinaryCalib(pzp.Piece):
         pzp.param.array(self, self.PARAM_CALIB_WL, False)(None)
 
         pzp.param.text(self, self.PARAM_SPEC_NAME, OceanSpectrometer.__name__, visible=False)(None)
-        pzp.param.text(self, self.PARAM_UNIFORM_NAME, pat.UniformPattern.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_BINARY_NAME, pat.BinaryGratingPattern.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_CORRECTOR_NAME, PhaseCorrector.__name__, visible=False)(None)
         pzp.param.text(self, self.PARAM_CALIB_BINARY_NAME, pat.CalBinaryGratingPattern.__name__, visible=False)(None)
+        
+        super().define_params()
         pzp.action.settings(self)
 
+        self[self.PARAM_SCAN_PARAM].set_value(f"{pat.BinaryGratingPattern.__name__}:{pat.BinaryGratingPattern.PARAM_PHASE}")
+        self[self.PARAM_SCAN_TARGET].set_value(f"{OceanSpectrometer.__name__}:values")
+        self[self.PARAM_SCAN_MAX].set_value(1023)
+        self[self.PARAM_SCAN_MIN].set_value(0)
+
     def define_actions(self):
-        @pzp.action.define(self, self.ACTION_MEASURE)
-        def measure():
-            sample_nb = self[self.PARAM_SAMPLE_NB].value
-            min_wl, max_wl = self[self.PARAM_MIN_WL].value, self[self.PARAM_MAX_WL].value
-            wait_time = self[self.PARAM_CAPT_INTERVAL].value / 1000
-            grating: pat.BinaryGratingPattern = self.puzzle[self[self.PARAM_BINARY_NAME].value]
-            uniform: pat.UniformPattern = self.puzzle[self[self.PARAM_UNIFORM_NAME].value]
-            spec: OceanSpectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
-            save_name = self[self.PARAM_FILENAME].value
+        super().define_actions()
 
-            spec_wavelengths = spec["wls"].value
-            spec_mask = (min_wl <= spec_wavelengths) & (spec_wavelengths <= max_wl)
-
-            mode = self[self.PARAM_MODE].value
-            contrasts = np.linspace(0, 1023, sample_nb).astype(int)
-            spectrums = [None] * sample_nb
-
-            if mode == self.MODE_EFF:
-                grating[pat.BinaryGratingPattern.PARAM_DUTY_CYCLE].set_value(0.5)
-
-            target_piece = grating if self.MODE_EFF == mode else uniform
-            target_piece[target_piece.PARAM_PHASE].set_value(0)
-            target_piece.actions[target_piece.ACTION_SEND]()
-            time.sleep(1)
-            self.puzzle.process_events()
-
-            for i, contrast in enumerate(contrasts):
-                target_piece[target_piece.PARAM_PHASE].set_value(contrast)
-                target_piece.actions[target_piece.ACTION_SEND]()
-                if self[self.PARAM_USE_CORRECTOR].value:
-                    self.puzzle[self[self.PARAM_CORRECTOR_NAME].value].actions[pat.PatternGenerator.ACTION_SEND]()
-                time.sleep(wait_time)
-                self.puzzle.process_events()
-                spectrums[i] = spec["values"].value[spec_mask]
-
-            spectrums = np.array(spectrums)
-
+        @pzp.action.define(self, "Plot and save")
+        def plot():
+            contrasts = self.x
+            spectrums = self.y
             nm_per_wl = False
             nm_all = False
+            name = self[self.PARAM_FILENAME].value
+            wls = self.puzzle[self[self.PARAM_SPEC_NAME]]["wls"].value
             if self[self.PARAM_NORMALIZE].value == self.NORM_PER_WL:
                 nm_per_wl = True
                 spectrums /= np.max(spectrums, axis=0)
             elif self[self.PARAM_NORMALIZE].value == self.NORM_ALL:
                 nm_all = True
                 spectrums /= np.max(spectrums)
-            effective_wls = spec_wavelengths[spec_mask]
 
-            self[self.PARAM_CALIB_DATA].set_value(spectrums)
-            self[self.PARAM_CALIB_WL].set_value(effective_wls)
-
-            plt.imshow(spectrums, origin="lower", aspect="auto", extent=[np.min(effective_wls), np.max(effective_wls), 0, 1023])
+            plt.imshow(spectrums, origin="lower", aspect="auto", extent=[np.min(wls), np.max(wls), 0, 1023])
             plt.xlabel("Wavelength (nm)")
             plt.ylabel("Phase (Grayscale)")
             cbar = plt.colorbar()
             cbar.set_label(f"{"Relative" if nm_all or nm_per_wl else ""} Intensity {"per wavelength" if nm_per_wl else ""}")
-            plt.savefig(f"{save_name}.svg")
             plt.show()
 
-            df = pd.DataFrame(spectrums, index=contrasts, columns=effective_wls)
-            df.to_csv(f"{save_name}")
-
-        @pzp.action.define(self, "Scan with calibrated binary")
-        def scan_cb():
-            sample_nb = self[self.PARAM_SAMPLE_NB].value
-            min_wl, max_wl = self[self.PARAM_MIN_WL].value, self[self.PARAM_MAX_WL].value
-            wait_time = self[self.PARAM_CAPT_INTERVAL].value / 1000
-            grating: pat.CalBinaryGratingPattern = self.puzzle[self[self.PARAM_CALIB_BINARY_NAME].value]
-            spec: OceanSpectrometer = self.puzzle[self[self.PARAM_SPEC_NAME].value]
-            save_name = self[self.PARAM_FILENAME].value
-
-            spec_wavelengths = spec["wls"].value
-            spec_mask = (min_wl <= spec_wavelengths) & (spec_wavelengths <= max_wl)
-            effective_wls = spec_wavelengths[spec_mask]
-
-            contrasts = np.linspace(0, 1, sample_nb)
-            spectrums = [None] * sample_nb 
-
-            grating[grating.PARAM_ATTN].set_value(0)
-            grating.actions[grating.ACTION_SEND]()
-            time.sleep(0.5)
-            self.puzzle.process_events()
-            time.sleep(0.5)
-            self.puzzle.process_events()
-
-
-            for i, contrast in enumerate(contrasts):
-                grating[grating.PARAM_ATTN].set_value(contrast)
-                grating.actions[grating.ACTION_SEND]()
-                time.sleep(wait_time)
-                self.puzzle.process_events()
-                spectrums[i] = spec["values"].value[spec_mask]
-            spectrums = np.array(spectrums)
-
-            nm_per_wl = False
-            nm_all = False
-            if self[self.PARAM_NORMALIZE].value == self.NORM_PER_WL:
-                nm_per_wl = True
-                spectrums /= np.max(spectrums, axis=0)
-            elif self[self.PARAM_NORMALIZE].value == self.NORM_ALL:
-                nm_all = True
-                spectrums /= np.max(spectrums)
-            effective_wls = spec_wavelengths[spec_mask]
-
-            plt.imshow(spectrums, origin="lower", aspect="auto", extent=[np.min(effective_wls), np.max(effective_wls), 0, 1])
-            plt.xlabel("Wavelength (nm)")
-            plt.ylabel("Target intensity")
-            cbar = plt.colorbar()
-            cbar.set_label(f"{"Relative" if nm_all or nm_per_wl else ""} Intensity {"per wavelength" if nm_per_wl else ""}")
-            plt.savefig(f"{save_name}.svg")
-            plt.show()
-
-            df = pd.DataFrame(spectrums, index=contrasts, columns=effective_wls)
-            df.to_csv(f"{save_name}")
-
-
-
+            df = pd.DataFrame(spectrums, index=contrasts, columns=wls)
+            df.to_csv(f"{name}.csv")
+    
+    def trigger_scan(self):
+        grating: pat.BinaryGratingPattern = self.puzzle[self[self.PARAM_BINARY_NAME].value]
+        corrector = self.puzzle[self[self.PARAM_CORRECTOR_NAME].value]
+        grating.actions[grating.ACTION_SEND]()
+        if self[self.PARAM_USE_CORRECTOR].value:
+            corrector.actions[corrector.ACTION_SEND]()
+            
 
 class PhaseCorrector(pat.PatternGenerator):
     """
@@ -398,24 +321,16 @@ class PhaseCorrector(pat.PatternGenerator):
             max_wl = self[self.PARAM_MAX_WL].value
             min_wl = self[self.PARAM_MIN_WL].value
 
-            col_nb = self.puzzle[self.get_slm_piece_name()][SLMPiece.PARAM_IMAGE].value.shape[1]
+            col_nb = self.check_slm_status()[1]
             columns = np.arange(col_nb)
             print(columns.shape, wl_scan.shape)
             wls = np.interp(columns, scan_col, scan_wls)
             self.correction_fct = []  # Phase to grayscale
 
-            A_data = np.zeros_like(wls)
-            B_data = np.zeros_like(wls)
-            C_data = np.zeros_like(wls)
-            D_data = np.zeros_like(wls)
-
-
             # Perform fit 
             for i, wl in enumerate(wls): 
                 col = np.argmin(np.abs(calib_wls - wl))
-                # print(f'{col}, {calib_wls[col]}', end=" $ ")
                 if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
-                    # print("Fuck")
                     self.correction_fct.append(lambda _: np.zeros_like(_))
                     continue
                 intensities = data[:, col]
@@ -424,117 +339,47 @@ class PhaseCorrector(pat.PatternGenerator):
                 fit_end_idx = min_idx + int(0.15*fit_data.shape[0])
                 fit_data = fit_data[:fit_end_idx]
                 fit_contrasts = grayscales[:fit_end_idx]
-                cos2_model = lambda x,A,B,C,D: A*(np.cos(B*x + C)**2)+D
+                def amplitude(x, x0, k):
+                    y = np.cos(x0*(x**2)+k*x)**2
+                    return y
+                cos2_model = lambda x,A,B,C,D,E,F,G,H: A*amplitude(x/1024, E, F)*(np.cos(H*(x**0.7)+G*(x**1.2)+B*x + C)**2)+D
 
-                # First half
                 A1 = np.max(fit_data) - np.min(fit_data)
                 B1 = np.pi/800      # rough guess for frequency
                 C1 = 0
                 D1 = 0
-                p1 = [A1,B1,C1,D1]
+                E1 = 0
+                F1 = 0.4
+                G1 = 0
+                H1 = 0
+                p1 = [A1,B1,C1,D1,E1,F1,G1,H1]
                 popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p1)
-
-                # Second half
-                after_min = intensities[min_idx:]
-                max_idx = np.argmax(after_min)
-                fit_end_idx2 = max_idx + int(0.15*fit_data.shape[0]) 
-                fit_data2 = after_min[:fit_end_idx2]
-                fit_contrasts2 = grayscales[min_idx:min_idx+fit_end_idx2]
-                A2 = np.max(fit_data) - np.min(fit_data)
-                B2 = np.pi/800      # rough guess for frequency
-                C2 = 0
-                D2 = 0
-                p2 = [A2,B2,C2,D2]
-                popt2, pcov = curve_fit(cos2_model, fit_contrasts2, fit_data2, p0=p2)
                 
-                test_contrasts = np.linspace(0, grayscales[fit_end_idx])
-                min_contrast_idx = np.argmin(cos2_model(test_contrasts, *popt))
-                min_contrast = test_contrasts[min_contrast_idx]
+                test_contrasts = np.linspace(0, 1024, 3000)
+                test_intensity = cos2_model(test_contrasts, *popt)
+                min_idx = np.argmin(test_intensity)
+                max1_idx = np.argmax(test_intensity[:min_idx])
+                max2_idx = np.argmax(test_intensity[min_idx:])
 
-                test_contrast = np.linspace(np.min(fit_contrasts2), np.max(fit_contrasts2))
-                max_contrast_idx = np.argmax(cos2_model(test_contrast, *popt2))
-                max_contrast = test_contrast[max_contrast_idx]
-
-                def f(contrasts, min_c=min_contrast, max_c=max_contrast):
-                    return np.interp(contrasts, np.array([0, 512, 1023]), np.array([0, min_c, max_c]))
+                def f(contrasts, max1_c=max1_idx, min_c=min_idx, max2_c=max2_idx):
+                    return np.interp(contrasts, np.array([0, 512, 1023]), np.array([max1_c, min_c, max2_c]))
 
                 self.correction_fct.append(f)
-            plt.figure()
-            plt.scatter(wls, A_data)
-            plt.title("A")
-            plt.figure()
-            plt.scatter(wls, B_data)
-            plt.title("B")
-            plt.figure()
-            plt.scatter(wls, C_data)
-            plt.title("C")
-            plt.figure()
-            plt.scatter(wls, D_data)
-            plt.title("D")
-            plt.show()
-            
             return
 
         @pzp.action.define(self, "Show correction function")
         def plot():
             slm_dim = self.check_slm_status()
             plot_data = []
-            df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
-            data = df.values  # Spectrums
-            grayscales = df.index.to_numpy()
-            calib_wls = df.columns.to_numpy(dtype=float)
-
             max_wl = self[self.PARAM_MAX_WL].value
             min_wl = self[self.PARAM_MIN_WL].value
 
+            wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
+            scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
+
             for wl in range(min_wl, max_wl, 2):
-                col = np.argmin(np.abs(calib_wls - wl))
-                # print(f'{col}, {calib_wls[col]}', end=" $ ")
-                if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
-                    # print("Fuck")
-                    self.correction_fct.append(lambda _: np.zeros_like(_))
-                    continue
-                intensities = data[:, col]
-                fit_data = data[:, col]
-                min_idx = np.argmin(fit_data)
-                fit_end_idx = min_idx + int(0.15*fit_data.shape[0])
-                fit_data = fit_data[:fit_end_idx]
-                fit_contrasts = grayscales[:fit_end_idx]
-                cos2_model = lambda x,A,B,C,D: A*(np.cos(B*x + C)**2)+D
-
-                # First half
-                A1 = np.max(fit_data) - np.min(fit_data)
-                B1 = np.pi/800      # rough guess for frequency
-                C1 = 0
-                D1 = 0
-                p1 = [A1,B1,C1,D1]
-                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p1)
-
-                # Second half
-                after_min = intensities[min_idx:]
-                max_idx = np.argmax(after_min)
-                fit_end_idx2 = max_idx + int(0.15*fit_data.shape[0]) 
-                fit_data2 = after_min[:fit_end_idx2]
-                fit_contrasts2 = grayscales[min_idx:min_idx+fit_end_idx2]
-                A2 = np.max(fit_data) - np.min(fit_data)
-                B2 = np.pi/800      # rough guess for frequency
-                C2 = 0
-                D2 = 0
-                p2 = [A2,B2,C2,D2]
-                popt2, pcov = curve_fit(cos2_model, fit_contrasts2, fit_data2, p0=p2)
-                
-                test_contrasts = np.linspace(0, grayscales[fit_end_idx])
-                min_contrast_idx = np.argmin(cos2_model(test_contrasts, *popt))
-                min_contrast = test_contrasts[min_contrast_idx]
-
-                test_contrast = np.linspace(np.min(fit_contrasts2), np.max(fit_contrasts2))
-                max_contrast_idx = np.argmax(cos2_model(test_contrast, *popt2))
-                max_contrast = test_contrast[max_contrast_idx]
-
-                def f(contrasts, min_c=min_contrast, max_c=max_contrast):
-                    return np.interp(contrasts, np.array([0, 512, 1023]), np.array([0, min_c, max_c]))
-
-                plot_data.append(f(np.linspace(0,1023)))
+                col = int(np.interp(wl, scan_wls, scan_col))
+                plot_data.append(self.correction_fct[col](np.linspace(0,1023)))
             
             plt.figure()
             plt.imshow(np.array(plot_data).T, origin="lower", aspect="auto", extent=[min_wl, max_wl, 0, 2*np.pi]) 
