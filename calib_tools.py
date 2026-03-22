@@ -331,12 +331,8 @@ class PhaseCorrector(pat.PatternGenerator):
                 if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
                     self.correction_fct.append(lambda _: np.zeros_like(_))
                     continue
-                intensities = data[:, col]
                 fit_data = data[:, col]
-                min_idx = np.argmin(fit_data)
-                fit_end_idx = min_idx + int(0.15*fit_data.shape[0])
-                fit_data = fit_data[:fit_end_idx]
-                fit_contrasts = grayscales[:fit_end_idx]
+                
                 def amplitude(x, x0, k):
                     y = np.cos(x0*(x**2)+k*x)**2
                     return y
@@ -351,7 +347,7 @@ class PhaseCorrector(pat.PatternGenerator):
                 G1 = 0
                 H1 = 0
                 p1 = [A1,B1,C1,D1,E1,F1,G1,H1]
-                popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_data, p0=p1)
+                popt, pcov = curve_fit(cos2_model, grayscales, fit_data, p0=p1)
                 
                 test_contrasts = np.linspace(0, 1023, 3000)
                 test_intensity = cos2_model(test_contrasts, *popt)
