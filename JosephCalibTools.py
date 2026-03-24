@@ -407,12 +407,6 @@ class PhaseCorrector(pat.PatternGenerator):
             wls = np.interp(columns, scan_col, scan_wls)
             self.correction_fct = []  # Phase to grayscale
 
-            A_data = np.zeros_like(wls)
-            B_data = np.zeros_like(wls)
-            C_data = np.zeros_like(wls)
-            D_data = np.zeros_like(wls)
-
-
             # Perform fit 
             for i, wl in enumerate(wls): 
                 col = np.argmin(np.abs(calib_wls - wl))
@@ -474,19 +468,6 @@ class PhaseCorrector(pat.PatternGenerator):
                     return f
                 
                 self.correction_fct.append(make_correction_fct(inv_interp))
-            plt.figure()
-            plt.scatter(wls, A_data)
-            plt.title("A")
-            plt.figure()
-            plt.scatter(wls, B_data)
-            plt.title("B")
-            plt.figure()
-            plt.scatter(wls, C_data)
-            plt.title("C")
-            plt.figure()
-            plt.scatter(wls, D_data)
-            plt.title("D")
-            plt.show()
             
             return
 

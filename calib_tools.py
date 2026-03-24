@@ -12,6 +12,8 @@ import pandas as pd
 from pyqtgraph.Qt import QtWidgets
 from puzzlepiece.extras import hardware_tools as pht
 import pyqtgraph as pg
+from scipy.signal import savgol_filter
+from scipy.interpolate import interp1d
 
 
 class ParameterScanner(pzp.Piece):
@@ -293,6 +295,7 @@ class PhaseCorrector(pat.PatternGenerator):
     PARAM_WL_FILE = "Wavelength scan file name"
     PARAM_CALIB_FILE = "Calibration file name"
     PARAM_GRAYSCALES = "Grayscales"
+    PARAM_MODE = "Method"
     # PARAM_INVERT_CORRECTION_ORDER = "Invert correction order"
 
     def define_params(self):
@@ -302,7 +305,93 @@ class PhaseCorrector(pat.PatternGenerator):
         pzp.param.text(self, self.PARAM_WL_FILE, "wl_scan.csv")(None)
         # Column by column (per wavelength) correction data. Each index correcspond to a (2,N) shape matrix that contains calibration curve.
         pzp.param.text(self, self.PARAM_CALIB_FILE, "binarycalib.csv", visible=True)(None)
+        pzp.param.dropdown(self, self.PARAM_MODE, "Fit")(["Fit", "Interpolation"])
         super().define_params()
+
+    def fit_method(self, grayscales, intensities):
+        def amplitude(x, x0, k):
+            y = np.cos(x0*(x**2)+k*x)**2
+            return y
+        cos2_model = lambda x,A,B,C,D,E,F,G,H: A*amplitude(x/1024, E, F)*(np.cos(H*(x**0.7)+G*(x**1.2)+B*x + C)**2)+D
+
+        A1 = np.max(intensities) - np.min(intensities)
+        B1 = np.pi/800      # rough guess for frequency
+        C1 = 0
+        D1 = 0
+        E1 = 0
+        F1 = 0.4
+        G1 = 0
+        H1 = 0
+        p1 = [A1,B1,C1,D1,E1,F1,G1,H1]
+        popt, pcov = curve_fit(cos2_model, grayscales, intensities, p0=p1)
+        
+        test_contrasts = np.linspace(0, 1023, 3000)
+        test_intensity = cos2_model(test_contrasts, *popt)
+        min_idx = np.argmin(test_intensity)
+        max1_idx = np.argmax(test_intensity[:min_idx])
+        max2_idx = np.argmax(test_intensity[min_idx:])
+
+        min_c = test_contrasts[min_idx]
+        max1_c = (test_contrasts[:min_idx])[max1_idx]
+        max2_c = (test_contrasts[min_idx:])[max2_idx]
+
+        def f(contrasts, max1_c_=max1_c, min_c_=min_c, max2_c_=max2_c):
+            return np.interp(contrasts, np.array([0, 512, 1023]), np.array([max1_c_, min_c_, max2_c_]))
+        return f
+    
+    def interp_method(self, grayscales, intensities):
+        # 1. Smooth the data to eliminate noise (window_length must be odd)
+        # May need to tweak window_length (e.g., 51, 101) based on sampling density
+        smoothed = savgol_filter(intensities, window_length=12, polyorder=6)
+        
+        # 2. Find the global minimum (1 * pi phase)
+        min_idx = np.argmin(smoothed)
+        g_pi = grayscales[min_idx]
+        I_min = smoothed[min_idx]
+        
+        # 3. Find the first local maximum (0 * pi phase) in the first half
+        max1_idx = np.argmax(smoothed[:min_idx])
+        g_0 = grayscales[max1_idx]
+        I_max1 = smoothed[max1_idx]
+        
+        # 4. Find the second local maximum (2 * pi phase) in the second half
+        max2_idx = min_idx + np.argmax(smoothed[min_idx:])
+        g_2pi = grayscales[max2_idx]
+        I_max2 = smoothed[max2_idx]
+        
+        # 5. Extract actual phase response from the smoothed curve 
+        # Using I = I_min + (I_max - I_min)/2 * (1 + cos(phi)) -> phi = arccos(2 * I_norm - 1)
+        active_gray = grayscales[max1_idx:max2_idx+1]
+        active_I = smoothed[max1_idx:max2_idx+1]
+        
+        half1_mask = active_gray <= g_pi
+        half2_mask = active_gray > g_pi
+        
+        phase_response = np.zeros_like(active_gray, dtype=float)
+        
+        # Calculate phase for 0 to pi
+        I_norm1 = (active_I[half1_mask] - I_min) / (I_max1 - I_min)
+        I_norm1 = np.clip(I_norm1, 0, 1) # Clip to avoid domain errors in arccos due to slight noise
+        phase_response[half1_mask] = np.arccos(2 * I_norm1 - 1)
+        
+        # Calculate phase for pi to 2pi
+        I_norm2 = (active_I[half2_mask] - I_min) / (I_max2 - I_min)
+        I_norm2 = np.clip(I_norm2, 0, 1)
+        phase_response[half2_mask] = 2 * np.pi - np.arccos(2 * I_norm2 - 1)
+        
+        # 6. Create the correction function
+        # This interpolator maps actual phase (0 to 2pi) back to the required grayscale
+        inv_interp = interp1d(phase_response, active_gray, kind='cubic', bounds_error=False, fill_value=(g_0, g_2pi))
+        
+        # Create a closure to save the interpolator for this specific wavelength
+        def make_correction_fct(interpolator):
+            def f(target_contrasts):
+                # Assuming incoming target_contrasts are scaled 0-1023 for 0-2pi
+                target_phases = target_contrasts * (2 * np.pi / 1023)
+                return interpolator(target_phases)
+            return f
+        
+        return make_correction_fct(inv_interp)
 
     def define_actions(self):
         @pzp.action.define(self, "Get correction data")
@@ -316,9 +405,6 @@ class PhaseCorrector(pat.PatternGenerator):
             wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
             scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
 
-            max_wl = self[self.PARAM_MAX_WL].value
-            min_wl = self[self.PARAM_MIN_WL].value
-
             col_nb = self.check_slm_status()[1]
             columns = np.arange(col_nb)
             print(columns.shape, wl_scan.shape)
@@ -328,41 +414,12 @@ class PhaseCorrector(pat.PatternGenerator):
             # Perform fit 
             for i, wl in enumerate(wls): 
                 col = np.argmin(np.abs(calib_wls - wl))
-                if calib_wls[col] < min_wl or max_wl < calib_wls[col]:
-                    self.correction_fct.append(lambda _: np.zeros_like(_))
-                    continue
-                fit_data = data[:, col]
+                intensities = data[:, col]
                 
-                def amplitude(x, x0, k):
-                    y = np.cos(x0*(x**2)+k*x)**2
-                    return y
-                cos2_model = lambda x,A,B,C,D,E,F,G,H: A*amplitude(x/1024, E, F)*(np.cos(H*(x**0.7)+G*(x**1.2)+B*x + C)**2)+D
-
-                A1 = np.max(fit_data) - np.min(fit_data)
-                B1 = np.pi/800      # rough guess for frequency
-                C1 = 0
-                D1 = 0
-                E1 = 0
-                F1 = 0.4
-                G1 = 0
-                H1 = 0
-                p1 = [A1,B1,C1,D1,E1,F1,G1,H1]
-                popt, pcov = curve_fit(cos2_model, grayscales, fit_data, p0=p1)
-                
-                test_contrasts = np.linspace(0, 1023, 3000)
-                test_intensity = cos2_model(test_contrasts, *popt)
-                min_idx = np.argmin(test_intensity)
-                max1_idx = np.argmax(test_intensity[:min_idx])
-                max2_idx = np.argmax(test_intensity[min_idx:])
-
-                min_c = test_contrasts[min_idx]
-                max1_c = (test_contrasts[:min_idx])[max1_idx]
-                max2_c = (test_contrasts[min_idx:])[max2_idx]
-
-                def f(contrasts, max1_c_=max1_c, min_c_=min_c, max2_c_=max2_c):
-                    return np.interp(contrasts, np.array([0, 512, 1023]), np.array([max1_c_, min_c_, max2_c_]))
-
-                self.correction_fct.append(f)
+                if self[self.PARAM_MODE].value == "Fit":
+                    self.correction_fct.append(self.fit_method(grayscales, intensities))
+                else:
+                    self.correction_fct.append(self.interp_method(grayscales, intensities))
             return
 
         @pzp.action.define(self, "Show correction function")
