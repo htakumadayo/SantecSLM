@@ -310,19 +310,22 @@ class PhaseCorrector(pat.PatternGenerator):
 
     def fitted_intensity(self, contrasts, fit_contrasts, fit_intensities):
         def amplitude(x, x0, k):
-            y = np.cos(x0*(x**2)+k*x)**2
+            # y = np.cos(x0*(x**2)+k*x)**2
+            y = x0*(x**2)+k
             return y
-        cos2_model = lambda x,A,B,C,D,E,F,G,H: A*amplitude(x/1024, E, F)*(np.cos(H*(x**0.7)+G*(x**1.2)+B*x + C)**2)+D
+        cos2_model = lambda x,A,B,C,E,F,G,H: A*amplitude(x/1024, E, F)*(np.cos(H*(x**0.7)+G*(x**1.2)+B*x + C)**2)
 
         A1 = np.max(fit_intensities) - np.min(fit_intensities)
         B1 = np.pi/800      # rough guess for frequency
         C1 = 0
         D1 = 0
-        E1 = 0
-        F1 = 0.4
+        # E1 = 0
+        E1 = -1
+        # F1 = 0.4
+        F1 = 1
         G1 = 0
         H1 = 0
-        p1 = [A1,B1,C1,D1,E1,F1,G1,H1]
+        p1 = [A1,B1,C1,E1,F1,G1,H1]
         popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_intensities, p0=p1, maxfev=10000)
         
         return cos2_model(contrasts, *popt)
@@ -360,7 +363,7 @@ class PhaseCorrector(pat.PatternGenerator):
     def interp_method(self, grayscales, intensities):
         # 1. Smooth the data to eliminate noise (window_length must be odd)
         # May need to tweak window_length (e.g., 51, 101) based on sampling density
-        smoothed = savgol_filter(intensities, window_length=12, polyorder=6)
+        smoothed = savgol_filter(intensities, window_length=6, polyorder=3)
         
         # 2. Find the global minimum (1 * pi phase)
         min_idx = np.argmin(smoothed)
@@ -446,7 +449,7 @@ class PhaseCorrector(pat.PatternGenerator):
                     self.correction_fct.append(self.fit_method(grayscales, intensities_1, intensities_2, wl, calib_wls[closest_wl_idx], calib_wls[next_closest_wl_idx]))
 
                 else:
-                    self.correction_fct.append(self.interp_method(grayscales, intensities))
+                    self.correction_fct.append(self.interp_method(grayscales, intensities_1))
             return
 
         @pzp.action.define(self, "Show correction function")
