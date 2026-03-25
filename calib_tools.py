@@ -308,13 +308,13 @@ class PhaseCorrector(pat.PatternGenerator):
         pzp.param.dropdown(self, self.PARAM_MODE, "Fit")(["Fit", "Interpolation"])
         super().define_params()
 
-    def fit_method(self, grayscales, intensities):
+    def fitted_intensity(self, contrasts, fit_contrasts, fit_intensities):
         def amplitude(x, x0, k):
             y = np.cos(x0*(x**2)+k*x)**2
             return y
         cos2_model = lambda x,A,B,C,D,E,F,G,H: A*amplitude(x/1024, E, F)*(np.cos(H*(x**0.7)+G*(x**1.2)+B*x + C)**2)+D
 
-        A1 = np.max(intensities) - np.min(intensities)
+        A1 = np.max(fit_intensities) - np.min(fit_intensities)
         B1 = np.pi/800      # rough guess for frequency
         C1 = 0
         D1 = 0
@@ -323,10 +323,21 @@ class PhaseCorrector(pat.PatternGenerator):
         G1 = 0
         H1 = 0
         p1 = [A1,B1,C1,D1,E1,F1,G1,H1]
-        popt, pcov = curve_fit(cos2_model, grayscales, intensities, p0=p1)
+        popt, pcov = curve_fit(cos2_model, fit_contrasts, fit_intensities, p0=p1, maxfev=10000)
         
-        test_contrasts = np.linspace(0, 1023, 3000)
-        test_intensity = cos2_model(test_contrasts, *popt)
+        return cos2_model(contrasts, *popt)
+
+    def fit_method(self, grayscales, intensities1, intensities2, wl, wl1, wl2):
+        test_contrasts = np.linspace(0, 1023, 1200)
+        test_intensity1 = self.fitted_intensity(test_contrasts, grayscales, intensities1)
+        test_intensity2 = self.fitted_intensity(test_contrasts, grayscales, intensities1)
+        
+        int_interp = np.linspace(test_intensity1, test_intensity2)
+        wl_interp = np.linspace(wl1, wl2)
+        closest_wl_idx = np.argmin(np.abs(wl_interp - wl))
+        
+        test_intensity = int_interp[closest_wl_idx, :]
+
         min_idx = np.argmin(test_intensity)
         max1_idx = np.argmax(test_intensity[:min_idx])
         max2_idx = np.argmax(test_intensity[min_idx:])
@@ -405,19 +416,28 @@ class PhaseCorrector(pat.PatternGenerator):
             wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
             scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
 
+            A1 = 1
+            B1 = 0
+            p1 = [A1,B1]
+            popt, pcov = curve_fit(lambda x,A,B:A*x+B, scan_col, scan_wls, p0=p1, maxfev=10000)
+            
             col_nb = self.check_slm_status()[1]
             columns = np.arange(col_nb)
-            print(columns.shape, wl_scan.shape)
-            wls = np.interp(columns, scan_col, scan_wls)
+            wls =  popt[0]*columns + popt[1]
             self.correction_fct = []  # Phase to grayscale
 
             # Perform fit 
-            for i, wl in enumerate(wls): 
-                col = np.argmin(np.abs(calib_wls - wl))
-                intensities = data[:, col]
+            for i, wl in enumerate(wls):
+                closest_wl_idces = np.argsort(np.abs(calib_wls-wl))
+                closest_wl_idx = closest_wl_idces[0]
+                next_closest_wl_idx = closest_wl_idces[1]
+                intensities_1 = data[:, closest_wl_idx]
+                intensities_2 = data[:, next_closest_wl_idx]
+
                 
                 if self[self.PARAM_MODE].value == "Fit":
-                    self.correction_fct.append(self.fit_method(grayscales, intensities))
+                    self.correction_fct.append(self.fit_method(grayscales, intensities_1, intensities_2, wl, calib_wls[closest_wl_idx], calib_wls[next_closest_wl_idx]))
+
                 else:
                     self.correction_fct.append(self.interp_method(grayscales, intensities))
             return
@@ -451,7 +471,7 @@ class PhaseCorrector(pat.PatternGenerator):
         new_pattern = []
 
         for col_i in range(pattern.shape[1]):
-            new_pattern.append(self.correction_fct[col_i](pattern[:,col_i]))
+            new_pattern.append(self.correction_fct[col_i](pattern[:, col_i]))
 
         corrected_pattern = np.array(new_pattern)
         return corrected_pattern.T
