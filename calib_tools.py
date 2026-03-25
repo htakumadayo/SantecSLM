@@ -330,7 +330,7 @@ class PhaseCorrector(pat.PatternGenerator):
     def fit_method(self, grayscales, intensities1, intensities2, wl, wl1, wl2):
         test_contrasts = np.linspace(0, 1023, 1200)
         test_intensity1 = self.fitted_intensity(test_contrasts, grayscales, intensities1)
-        test_intensity2 = self.fitted_intensity(test_contrasts, grayscales, intensities1)
+        test_intensity2 = self.fitted_intensity(test_contrasts, grayscales, intensities2)
         
         int_interp = np.linspace(test_intensity1, test_intensity2)
         wl_interp = np.linspace(wl1, wl2)
@@ -340,14 +340,21 @@ class PhaseCorrector(pat.PatternGenerator):
 
         min_idx = np.argmin(test_intensity)
         max1_idx = np.argmax(test_intensity[:min_idx])
-        max2_idx = np.argmax(test_intensity[min_idx:])
+        max2_idx = np.argmax(test_intensity[min_idx:]) + min_idx + 1
 
-        min_c = test_contrasts[min_idx]
-        max1_c = (test_contrasts[:min_idx])[max1_idx]
-        max2_c = (test_contrasts[min_idx:])[max2_idx]
+        first_half = test_intensity[max1_idx:min_idx]
+        first_half /= np.max(first_half)
+        first_inversed = np.acos(np.sqrt(first_half))
+        
+        second_half = test_intensity[min_idx: max2_idx]
+        second_half /= np.max(second_half)
+        second_inversed = np.pi - np.acos(np.sqrt(second_half))
 
-        def f(contrasts, max1_c_=max1_c, min_c_=min_c, max2_c_=max2_c):
-            return np.interp(contrasts, np.array([0, 512, 1023]), np.array([max1_c_, min_c_, max2_c_]))
+        interp_contrasts = test_contrasts[max1_idx:max2_idx]
+        contrast_to_phase = np.concatenate((first_inversed, second_inversed))
+        
+        def f(contrasts,x=interp_contrasts, y=contrast_to_phase):
+            return np.interp(np.pi*contrasts/1024, y, x)
         return f
     
     def interp_method(self, grayscales, intensities):
