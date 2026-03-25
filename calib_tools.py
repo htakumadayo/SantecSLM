@@ -333,17 +333,20 @@ class PhaseCorrector(pat.PatternGenerator):
         return cos2_model(contrasts, *popt)
 
     def fit_method(self, grayscales, intensities1, intensities2, wl, wl1, wl2):
-        test_contrasts = np.linspace(0, 1023, 1200)
-        test_intensity1 = self.fitted_intensity(test_contrasts, grayscales, intensities1)
-        test_intensity2 = self.fitted_intensity(test_contrasts, grayscales, intensities2)
+        # test_contrasts = np.linspace(0, 1023, 1200)
+        # test_intensity1 = self.fitted_intensity(test_contrasts, grayscales, intensities1)
+        # test_intensity2 = self.fitted_intensity(test_contrasts, grayscales, intensities2)
+
+        # if 1250 < wl and wl < 1290:
+        #     return lambda x:np.zeros_like(x)
         
-        int_interp = np.linspace(test_intensity1, test_intensity2)
+        int_interp = np.linspace(intensities1, intensities2)
         wl_interp = np.linspace(wl1, wl2)
         closest_wl_idx = np.argmin(np.abs(wl_interp - wl))
         
         intensities = int_interp[closest_wl_idx, :]
         xvals = grayscales
-        y = intensities
+        y = intensities1
 
         def monotone_pchip_smooth(y, x=None, sigma=2, increasing=True):
             y = np.asarray(y)
@@ -467,6 +470,11 @@ class PhaseCorrector(pat.PatternGenerator):
             # wls =  popt[0]*columns + popt[1]
             wls = np.interp(columns, scan_col, scan_wls)
             self.correction_fct = []  # Phase to grayscale
+
+            plt.figure()
+            plt.plot(columns, wls)
+            plt.title("SLM column vs wl")
+            plt.show()
 
             # Perform fit 
             for i, wl in enumerate(wls):
@@ -654,6 +662,132 @@ class WavelengthScanner(pzp.Piece):
         x_peak = popt[1]
 
         return x_peak, popt, x_fit, y_fit
+
+
+class IntensityCalib(pzp.Piece):
+    PARAM_WL_FILE = "Wavelength scan file name"
+    PARAM_CALIB_FILE = "Calibration file name"
+
+    def define_params(self):
+        # pzp.param.checkbox(self, self.PARAM_INVERT_CORRECTION_ORDER, False)(None)
+        pzp.param.text(self, self.PARAM_WL_FILE, "wl_scan.csv")(None)
+        # Column by column (per wavelength) correction data. Each index correcspond to a (2,N) shape matrix that contains calibration curve.
+        pzp.param.text(self, self.PARAM_CALIB_FILE, "binarycalib.csv", visible=True)(None)
+        super().define_params()
+
+    def define_actions(self):
+        @pzp.action.define(self, "Scan intensity")
+        def scan():
+            sample = 100
+            interval = 250
+            rep = 3
+            period = 8
+            slm_dim = self.puzzle[SLMPiece.__name__][SLMPiece.PARAM_SLM_DIMENSIONS].value
+            spectrometer = self.puzzle[OceanSpectrometer.__name__]
+            data = []
+            tested_int = np.linspace(0, 1, sample)
+
+            for i, intensity in enumerate(tested_int):
+                # Generate pattern
+                pattern = np.zeros(slm_dim)
+                pattern[np.arange(0, slm_dim[0])%period < period*0.5, :] = 1
+
+                for col in range(slm_dim[1]):
+                    pattern[:, col] *= self.correction_fct[col](intensity)
+                self.puzzle[SLMPiece.__name__][SLMPiece.PARAM_IMAGE].set_value(pattern)
+                spec = np.zeros_like(spectrometer["values"].value)
+
+                # Scan
+                for _ in range(rep):
+                    time.sleep(interval/1000)
+                    spec += spectrometer["values"].value
+                    self.puzzle.process_events()
+                data.append(spec/rep)
+            wls = spectrometer["wls"].value
+            data = np.array(data)
+
+            df = pd.DataFrame(data, index=tested_int, columns=wls)
+            df.to_csv(f"intensity_calib.csv")
+
+            plt.figure()
+            plt.imshow(data/np.max(data, axis=0), origin="lower", aspect="auto", extent=[np.min(wls), np.max(wls), 0, 1]) 
+            plt.xlabel("WL")
+            plt.ylabel("Target intensity")
+            cbar = plt.colorbar()
+            cbar.set_label(f"Measured intensity")
+            plt.title("Intensity calibration")
+            plt.show()
+
+        @pzp.action.define(self, "Load calib data")
+        def load():
+            df = pd.read_csv(self[self.PARAM_CALIB_FILE].value, index_col=0)
+            data = df.values  # Spectrums
+            grayscales = df.index.to_numpy()
+            calib_wls = df.columns.to_numpy(dtype=float)
+
+            # Determine what wavelength correspond to what column
+            wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
+            scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
+            
+            col_nb = self.puzzle[SLMPiece.__name__][SLMPiece.PARAM_SLM_DIMENSIONS].value[1]
+            columns = np.arange(col_nb)
+            wls = np.interp(columns, scan_col, scan_wls)
+            self.correction_fct = []  # Phase to grayscale
+
+            # Perform fit 
+            for i, wl in enumerate(wls):
+                closest_wl_idces = np.argsort(np.abs(calib_wls-wl))
+                closest_wl_idx = closest_wl_idces[0]
+                next_closest_wl_idx = closest_wl_idces[1]
+                intensities_1 = data[:, closest_wl_idx]
+                intensities_2 = data[:, next_closest_wl_idx]
+
+                self.correction_fct.append(self.fit_method(grayscales, intensities_1, intensities_2, wl, calib_wls[closest_wl_idx], calib_wls[next_closest_wl_idx]))
+            return
+
+    def fit_method(self, grayscales, intensities1, intensities2, wl, wl1, wl2):
+        int_interp = np.linspace(intensities1, intensities2)
+        wl_interp = np.linspace(wl1, wl2)
+        closest_wl_idx = np.argmin(np.abs(wl_interp - wl))
+        
+        intensities = int_interp[closest_wl_idx, :]
+        xvals = grayscales
+        y = intensities1
+
+        def monotone_pchip_smooth(y, x=None, sigma=2, increasing=True):
+            y = np.asarray(y)
+            if x is None:
+                x = np.arange(len(y))
+            x = np.asarray(x)
+
+            # smooth
+            y_s = gaussian_filter1d(y, sigma=sigma)
+
+            # enforce monotonicity
+            if increasing:
+                y_m = np.maximum.accumulate(y_s)
+            else:
+                y_m = np.minimum.accumulate(y_s)
+
+            # monotone interpolant
+            f = PchipInterpolator(x, y_m)
+            return f(x), f
+
+        # --- minimum の位置を探す ---
+        imin = np.argmin(y)
+        x_min = xvals[imin]
+
+        # --- minimum の前後で分割 ---
+        x_left = xvals[:imin+1]
+        y_left = y[:imin+1]
+
+        x_left_test = np.linspace(0, x_min, 500)
+        I_test_left = monotone_pchip_smooth(y_left, x_left, increasing=False)[1](x_left_test)
+        I_test_left /= np.max(I_test_left)
+            
+        def f(intensity, x_left=x_left_test, I_left=I_test_left):
+            return np.interp(intensity, I_left[::-1], x_left[::-1])
+        return f
 
 
 class Polarizer45degHelper(pzp.Piece):
