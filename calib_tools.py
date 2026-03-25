@@ -276,7 +276,7 @@ class BinaryCalib(ParameterScanner):
             plt.show()
 
             df = pd.DataFrame(spectrums, index=contrasts, columns=wls)
-            df.to_csv(f"{name}.csv")
+            df.to_csv(f"{name}")
     
     def trigger_scan(self):
         grating: pat.BinaryGratingPattern = self.puzzle[self[self.PARAM_BINARY_NAME].value]
@@ -416,14 +416,15 @@ class PhaseCorrector(pat.PatternGenerator):
             wl_scan = np.loadtxt(self[self.PARAM_WL_FILE].value).T
             scan_col, scan_wls = wl_scan[0, :], wl_scan[1, :]
 
-            A1 = 1
-            B1 = 0
-            p1 = [A1,B1]
-            popt, pcov = curve_fit(lambda x,A,B:A*x+B, scan_col, scan_wls, p0=p1, maxfev=10000)
+            # A1 = 1
+            # B1 = 0
+            # p1 = [A1,B1]
+            # popt, pcov = curve_fit(lambda x,A,B:A*x+B, scan_col, scan_wls, p0=p1, maxfev=10000)
             
             col_nb = self.check_slm_status()[1]
             columns = np.arange(col_nb)
-            wls =  popt[0]*columns + popt[1]
+            # wls =  popt[0]*columns + popt[1]
+            wls = np.interp(columns, scan_col, scan_wls)
             self.correction_fct = []  # Phase to grayscale
 
             # Perform fit 
@@ -434,7 +435,6 @@ class PhaseCorrector(pat.PatternGenerator):
                 intensities_1 = data[:, closest_wl_idx]
                 intensities_2 = data[:, next_closest_wl_idx]
 
-                
                 if self[self.PARAM_MODE].value == "Fit":
                     self.correction_fct.append(self.fit_method(grayscales, intensities_1, intensities_2, wl, calib_wls[closest_wl_idx], calib_wls[next_closest_wl_idx]))
 
@@ -516,10 +516,11 @@ class WavelengthScanner(pzp.Piece):
             min_wl = self[self.PARAM_MIN_WL].value
             sample_nb= self[self.PARAM_SAMPLE_NUM].value
             
-            data = np.zeros(sample_nb)
-            col_indices = np.zeros(sample_nb)
+            data = []
+            col_indices = []
+            raw_data = []
 
-            for i in range(sample_nb):
+            for i in range(1, sample_nb):
                 offset_from_left_edge = (i/sample_nb)*slm_length
                 slit_offset = int(-slm_length/2 + offset_from_left_edge)
                 slit_pattern[slit_pattern.PARAM_OFFSET].set_value(slit_offset)
@@ -531,10 +532,13 @@ class WavelengthScanner(pzp.Piece):
                 mask = (min_wl <= wls) & (wls <= max_wl)
                 wls, spectrum = wls[mask], spectrum[mask]
 
-                max_idx = np.argmax(spectrum)
-                data[i] = wls[max_idx]
-                col_indices[i] = int(offset_from_left_edge)
-            util.save_csv(col_indices, data, self[self.PARAM_SAVE_NAME].value)        
+                x_peak, popt, x_local, y_local = self.fit_gaussian_peak(wls, spectrum, n_points=7)
+                data.append(x_peak)
+                raw_data.append(spectrum)
+                col_indices.append(int(offset_from_left_edge))
+            util.save_csv(np.array(col_indices), np.array(data), self[self.PARAM_SAVE_NAME].value)        
+            df = pd.DataFrame(np.array(raw_data), index=np.array(col_indices), columns=wls)
+            df.to_csv(f"raw_{self[self.PARAM_SAVE_NAME].value}")
 
             plt.figure()
             plt.plot(col_indices, data, 'k.-')
@@ -542,6 +546,73 @@ class WavelengthScanner(pzp.Piece):
             plt.ylabel("Wavelength")
             plt.title("Column vs Wavelength")
             plt.show()
+
+    def gaussian(self, x, A, x0, sigma, C):
+        return A * np.exp(-((x - x0) ** 2) / (2 * sigma ** 2)) + C
+
+    def fit_gaussian_peak(self, x, y, n_points=7):
+        """
+        Fit a Gaussian around the maximum using a small number of nearby points
+        and return the fitted peak position.
+
+        Parameters
+        ----------
+        x : array-like
+            x values
+        y : array-like
+            y values
+        n_points : int
+            Number of points around the maximum to use for the fit
+
+        Returns
+        -------
+        x_peak : float
+            Fitted peak position
+        popt : tuple
+            Fitted Gaussian parameters (A, x0, sigma, C)
+        x_fit : ndarray
+            x values used for the local fit
+        y_fit : ndarray
+            y values used for the local fit
+        """
+        x = np.asarray(x)
+        y = np.asarray(y)
+
+        i_max = np.argmax(y)
+        half = n_points // 2
+
+        i0 = max(0, i_max - half)
+        i1 = min(len(x), i_max + half + 1)
+
+        # adjust window if near boundary
+        if i1 - i0 < n_points:
+            if i0 == 0:
+                i1 = min(len(x), n_points)
+            elif i1 == len(x):
+                i0 = max(0, len(x) - n_points)
+
+        x_fit = x[i0:i1]
+        y_fit = y[i0:i1]
+
+        # initial guesses
+        A0 = y_fit.max() - y_fit.min()
+        x00 = x[i_max]
+        dx = np.mean(np.diff(x_fit)) if len(x_fit) > 1 else 1.0
+        sigma0 = max(dx * len(x_fit) / 4, 1e-12)
+        C0 = y_fit.min()
+
+        p0 = [A0, x00, sigma0, C0]
+
+        # optional bounds to keep fit reasonable
+        bounds = (
+            [0, x_fit.min(), 1e-12, -np.inf],
+            [np.inf, x_fit.max(), np.inf, np.inf]
+        )
+
+        popt, _ = curve_fit(self.gaussian, x_fit, y_fit, p0=p0, bounds=bounds, maxfev=10000)
+        x_peak = popt[1]
+
+        return x_peak, popt, x_fit, y_fit
 
 
 class Polarizer45degHelper(pzp.Piece):
