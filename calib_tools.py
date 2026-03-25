@@ -14,6 +14,8 @@ from puzzlepiece.extras import hardware_tools as pht
 import pyqtgraph as pg
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
+from scipy.interpolate import PchipInterpolator
+from scipy.ndimage import gaussian_filter1d
 
 
 class ParameterScanner(pzp.Piece):
@@ -339,25 +341,54 @@ class PhaseCorrector(pat.PatternGenerator):
         wl_interp = np.linspace(wl1, wl2)
         closest_wl_idx = np.argmin(np.abs(wl_interp - wl))
         
-        test_intensity = int_interp[closest_wl_idx, :]
+        intensities = int_interp[closest_wl_idx, :]
+        xvals = grayscales
+        y = intensities
 
-        min_idx = np.argmin(test_intensity)
-        max1_idx = np.argmax(test_intensity[:min_idx])
-        max2_idx = np.argmax(test_intensity[min_idx:]) + min_idx + 1
+        def monotone_pchip_smooth(y, x=None, sigma=2, increasing=True):
+            y = np.asarray(y)
+            if x is None:
+                x = np.arange(len(y))
+            x = np.asarray(x)
 
-        first_half = test_intensity[max1_idx:min_idx]
-        first_half /= np.max(first_half)
-        first_inversed = np.acos(np.sqrt(first_half))
-        
-        second_half = test_intensity[min_idx: max2_idx]
-        second_half /= np.max(second_half)
-        second_inversed = np.pi - np.acos(np.sqrt(second_half))
+            # smooth
+            y_s = gaussian_filter1d(y, sigma=sigma)
 
-        interp_contrasts = test_contrasts[max1_idx:max2_idx]
-        contrast_to_phase = np.concatenate((first_inversed, second_inversed))
-        
-        def f(contrasts,x=interp_contrasts, y=contrast_to_phase):
-            return np.interp(np.pi*contrasts/1024, y, x)
+            # enforce monotonicity
+            if increasing:
+                y_m = np.maximum.accumulate(y_s)
+            else:
+                y_m = np.minimum.accumulate(y_s)
+
+            # monotone interpolant
+            f = PchipInterpolator(x, y_m)
+            return f(x), f
+
+        # --- minimum の位置を探す ---
+        imin = np.argmin(y)
+        x_min = xvals[imin]
+
+        # --- minimum の前後で分割 ---
+        x_left = xvals[:imin+1]
+        y_left = y[:imin+1]
+
+        x_right = xvals[imin:]
+        y_right = y[imin:]
+
+        x_left_test = np.linspace(0, x_min, 500)
+        x_right_test = np.linspace(x_right[0], x_right[-1], 500)
+        I_test_left = monotone_pchip_smooth(y_left, x_left, increasing=False)[1](x_left_test)
+        I_test_left /= np.max(I_test_left)
+        I_test_right = monotone_pchip_smooth(y_right, x_right, increasing=True)[1](x_right_test)
+        I_test_right /= np.max(I_test_right)
+            
+        def f(contrasts, x_left=x_left_test, I_left=I_test_left, x_right=x_right_test, I_right=I_test_right):
+            result = np.zeros_like(contrasts)
+            mask_left = (contrasts < 512)
+            mask_right = (contrasts >= 512)
+            result[mask_left] = np.interp(np.cos(np.pi*contrasts[mask_left]/1024)**2, I_left[::-1], x_left[::-1])
+            result[mask_right] = np.interp(np.cos(np.pi*contrasts[mask_right]/1024)**2, I_right, x_right)
+            return result
         return f
     
     def interp_method(self, grayscales, intensities):
