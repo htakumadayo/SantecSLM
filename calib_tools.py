@@ -535,7 +535,7 @@ class WavelengthScanner(pzp.Piece):
                 x_peak, popt, x_local, y_local = self.fit_gaussian_peak(wls, spectrum, n_points=7)
                 data.append(x_peak)
                 raw_data.append(spectrum)
-                col_indices.append(int(offset_from_left_edge))
+                col_indices.append(slit_offset + slm_length/2)
             util.save_csv(np.array(col_indices), np.array(data), self[self.PARAM_SAVE_NAME].value)        
             df = pd.DataFrame(np.array(raw_data), index=np.array(col_indices), columns=wls)
             df.to_csv(f"raw_{self[self.PARAM_SAVE_NAME].value}")
